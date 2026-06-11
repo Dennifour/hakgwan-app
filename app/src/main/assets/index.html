@@ -23,7 +23,7 @@
     .seat-cell { transition: background .2s, box-shadow .2s; }
     .stu-btn   { transition: background .15s, box-shadow .15s; }
 
-    /* 출석표 스타일 */
+    /* Attendance table styles */
     .att-table { border-collapse: collapse; font-size: 0.78rem; font-family: 'Noto Sans KR', sans-serif; }
     .att-table th, .att-table td { border: 1px solid #CBD5E1; padding: 0.35rem 0.5rem; white-space: nowrap; }
     .att-table th { background: #1E3A8A; color: #fff; font-weight: 700; text-align: center; position: sticky; top: 0; z-index: 2; }
@@ -46,7 +46,7 @@
 <div id="root"></div>
 
 <script>
-/* ── 네이티브 브릿지: 파일 저장/인쇄를 안드로이드로 연결 (앱 로직은 그대로) ── */
+/* ── Native bridge: routes file save/print to Android (app logic unchanged) ── */
 (function(){
   function saveBlob(filename, blob){
     var r = new FileReader();
@@ -79,7 +79,7 @@
 const { useState, useEffect, useCallback, useRef } = React;
 
 // ─────────────────────────────────────────────
-//  상수
+//  Constants
 // ─────────────────────────────────────────────
 const DEFAULT_STUDENTS = [
   "강다은","강제서","강경현","고준혁","김민찬","김민채","김성래","김시연",
@@ -87,11 +87,22 @@ const DEFAULT_STUDENTS = [
   "우희준","윤동건","이서준","이서현","이승권","임지인","정석우","정승이",
   "정찬호","고창근","임창환","채승헌","김채연","이형민","최진규",
 ];
-const SEAT_COUNT  = 31;
-const FRONT_COUNT = 12;
+const DEFAULT_COLS = 6;   // Default number of columns (horizontal)
+const DEFAULT_ROWS = 5;   // Default number of rows (vertical)
+const FRONT_COUNT  = 12;  // Number of front-row seats
+
+// Compute the seat grid based on the number of students.
+// Rows stay fixed at the configured value; columns auto-expand when students exceed seats.
+const getGrid = (data) => {
+  const rows     = data.seat_rows || DEFAULT_ROWS;
+  const baseCols = data.seat_cols || DEFAULT_COLS;
+  const n        = (data.students || DEFAULT_STUDENTS).length;
+  const cols     = Math.max(baseCols, Math.ceil(n / rows));
+  return { rows, cols, count: rows * cols };
+};
 
 // ─────────────────────────────────────────────
-//  유틸
+//  Utils
 // ─────────────────────────────────────────────
 const getMonthKey = (d = new Date()) =>
   `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
@@ -108,7 +119,7 @@ const formatHHMM  = (date) => {
   const m = String(date.getMinutes()).padStart(2,"0");
   return `${h}:${m}`;
 };
-// 오늘 날짜 파일명 형식 (아침자습출석 - 년/월/일)
+// Today's filename format (morning self-study attendance - Y/M/D)
 const getTodayFilename = (d = new Date()) => {
   const y = d.getFullYear();
   const mo = String(d.getMonth()+1).padStart(2,"0");
@@ -116,7 +127,7 @@ const getTodayFilename = (d = new Date()) => {
   return `아침자습출석 - ${y}/${mo}/${day}`;
 };
 
-// 월의 모든 날짜 반환 (YYYY-MM-DD 배열)
+// Return all dates in the month (array of YYYY-MM-DD)
 const getDaysInMonth = (monthKey) => {
   const [y, m] = monthKey.split("-").map(Number);
   const days = [];
@@ -127,7 +138,7 @@ const getDaysInMonth = (monthKey) => {
   return days;
 };
 
-// 오늘 이미 출석한 학생인지 확인
+// Check whether the student has already attended today
 const hasAttendedToday = (data, student) => {
   const today = getTodayKey();
   const month = getMonthKey();
@@ -137,7 +148,7 @@ const hasAttendedToday = (data, student) => {
 };
 
 // ─────────────────────────────────────────────
-//  스토리지
+//  Storage
 // ─────────────────────────────────────────────
 const STORAGE_KEY = "class_mgr_v1";
 const SESSION_KEY = "class_mgr_sessions_v1";
@@ -150,6 +161,8 @@ const loadData = () => {
       if (!parsed.auto_end_time) parsed.auto_end_time = "08:40";
       if (!parsed.students) parsed.students = DEFAULT_STUDENTS;
       if (!parsed.attendance_times) parsed.attendance_times = {};
+      if (!parsed.seat_cols) parsed.seat_cols = DEFAULT_COLS;
+      if (!parsed.seat_rows) parsed.seat_rows = DEFAULT_ROWS;
       return parsed;
     }
   } catch(_) {}
@@ -160,6 +173,8 @@ const loadData = () => {
     attendance_times: {},
     last_auto_end: "",
     auto_end_time: "08:40",
+    seat_cols: DEFAULT_COLS,
+    seat_rows: DEFAULT_ROWS,
   };
 };
 
@@ -180,7 +195,7 @@ const saveSessions = (sessions, ciTimes) => {
 };
 
 // ─────────────────────────────────────────────
-//  출석 기록 헬퍼
+//  Attendance record helpers
 // ─────────────────────────────────────────────
 function addRecord(data, student, dur, month, today, checkInTimeStr) {
   const d = JSON.parse(JSON.stringify(data));
@@ -191,7 +206,7 @@ function addRecord(data, student, dur, month, today, checkInTimeStr) {
   if (!A[student].history.includes(today)) {
     A[student].count++;
     A[student].history.push(today);
-    // 출석 시간 기록
+    // Record check-in time
     if (!d.attendance_times) d.attendance_times = {};
     if (!d.attendance_times[month]) d.attendance_times[month] = {};
     if (!d.attendance_times[month][student]) d.attendance_times[month][student] = {};
@@ -204,7 +219,7 @@ function addRecord(data, student, dur, month, today, checkInTimeStr) {
 }
 
 // ─────────────────────────────────────────────
-//  디자인 토큰
+//  Design tokens
 // ─────────────────────────────────────────────
 const T = {
   bg:"#F0F4F8", surface:"#FFFFFF",
@@ -221,12 +236,12 @@ const btn = (bg="#3B6FE8", opts={}) => ({
 });
 
 // ─────────────────────────────────────────────
-//  루트 앱
+//  Root app
 // ─────────────────────────────────────────────
 function App() {
   const [view,           setView]          = useState("home");
   const [data,           setData]          = useState(() => loadData());
-  const [arrangement,    setArrangement]   = useState(Array(SEAT_COUNT).fill(""));
+  const [arrangement,    setArrangement]   = useState(() => Array(getGrid(loadData()).count).fill(""));
   const [frontSeated,    setFrontSeated]   = useState([]);
   const [activeSessions, setActiveSessions]= useState(() => loadSessions().activeSessions);
   const [checkInTimes,   setCheckInTimes]  = useState(() => loadSessions().checkInTimes);  // student -> Date.now() check-in timestamp
@@ -236,13 +251,20 @@ function App() {
   const autoEndRef = useRef("");
   const dataRef    = useRef(data);
 
-  // students 파생 (data에서 읽음)
+  // Derive students / seat grid from data
   const students = data.students || DEFAULT_STUDENTS;
+  const grid     = getGrid(data);
 
   useEffect(() => { dataRef.current = data; saveData(data); }, [data]);
   useEffect(() => { saveSessions(activeSessions, checkInTimes); }, [activeSessions, checkInTimes]);
 
-  // ── 나가기 전 자동 파일 저장 ──
+  // When the student list changes, clear the seating so new students are reflected (re-tap "Arrange seats" to apply).
+  useEffect(() => {
+    setArrangement(Array(getGrid(dataRef.current).count).fill(""));
+    setFrontSeated([]);
+  }, [students]);
+
+  // ── Auto-save file before exit ──
   useEffect(() => {
     const handleBeforeUnload = () => {
       const d = dataRef.current;
@@ -270,13 +292,13 @@ function App() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  // 시계
+  // Clock
   useEffect(() => {
     const t = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(t);
   }, []);
 
-  // 자동 종료 (설정된 시간에 맞게)
+  // Auto end (at the configured time)
   useEffect(() => {
     const now = currentTime;
     const today = getTodayKey(now);
@@ -306,13 +328,14 @@ function App() {
     }
   }, [currentTime]);
 
-  // 자리 섞기
+  // Shuffle seats
   const shuffleSeats = useCallback(() => {
     const sts = dataRef.current.students || DEFAULT_STUDENTS;
-    const front   = shuffle(dataRef.current.front_students.filter(s => sts.includes(s)));
+    const { count } = getGrid(dataRef.current);
+    const front   = shuffle((dataRef.current.front_students || []).filter(s => sts.includes(s)));
     const normal  = shuffle(sts.filter(s => !front.includes(s)));
-    const frontIdx= shuffle(Array.from({length:FRONT_COUNT},(_,i)=>i));
-    const arr     = Array(SEAT_COUNT).fill("");
+    const frontIdx= shuffle(Array.from({length:Math.min(FRONT_COUNT, count)},(_,i)=>i));
+    const arr     = Array(count).fill("");
     const placed  = [], overflow = [];
     for (const s of front) {
       if (frontIdx.length) { arr[frontIdx.pop()] = s; placed.push(s); }
@@ -324,10 +347,10 @@ function App() {
     setFrontSeated(placed);
   }, []);
 
-  // 자습 토글 (하루 1회 제한)
+  // Self-study toggle (once per day)
   const toggleAttendance = useCallback((student) => {
     if (activeSessions[student] != null) {
-      // 종료
+      // End
       const st  = activeSessions[student];
       const dur = Math.floor((Date.now() - st) / 1000);
       const now = new Date();
@@ -338,7 +361,7 @@ function App() {
       setCheckInTimes(prev => { const n={...prev}; delete n[student]; return n; });
       setToast(`✅ ${student} 자습 완료 · ${formatTime(dur)}`);
     } else {
-      // 이미 오늘 출석한 경우 차단
+      // Block if already attended today
       if (hasAttendedToday(dataRef.current, student)) {
         setToast(`⚠ ${student}은(는) 오늘 이미 자습 기록이 있습니다`);
         return;
@@ -349,9 +372,25 @@ function App() {
     }
   }, [activeSessions, checkInTimes]);
 
+  // Cancel a self-study start (pressed by mistake — remove the session without recording)
+  const cancelAttendance = useCallback((student) => {
+    setActiveSessions(prev => { const n={...prev}; delete n[student]; return n; });
+    setCheckInTimes(prev  => { const n={...prev}; delete n[student]; return n; });
+    setToast(`↩ ${student} 자습 시작 취소됨 (기록되지 않음)`);
+  }, []);
+
   const saveFront = useCallback((front) => {
     const d = {...dataRef.current, front_students: front};
     setData(d);
+  }, []);
+
+  // Save seat grid size (columns/rows)
+  const saveGrid = useCallback((cols, rows) => {
+    const d = {...dataRef.current, seat_cols: cols, seat_rows: rows};
+    setData(d);
+    setArrangement(Array(getGrid(d).count).fill(""));
+    setFrontSeated([]);
+    setToast(`✅ 자리 배치가 ${cols}열 × ${rows}행으로 설정되었습니다`);
   }, []);
 
   const saveStudents = useCallback((newStudents) => {
@@ -366,7 +405,7 @@ function App() {
     setToast(`⏱ 자습 종료 시간이 ${time}으로 설정되었습니다`);
   }, []);
 
-  // 수동 파일 저장 (오늘 날짜 파일명)
+  // Manual file save (today's filename)
   const saveToFile = useCallback(() => {
     try {
       const filename = getTodayFilename();
@@ -403,7 +442,7 @@ function App() {
     setToast("💾 파일로 저장되었습니다");
   }, []);
 
-  // 파일 불러오기 (localStorage에 병합 저장)
+  // Import file (merge into localStorage)
   const importAttendance = useCallback((e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -438,7 +477,7 @@ function App() {
 
   return (
     <div>
-      {/* 토스트 알림 */}
+      {/* Toast notification */}
       {toast && (
         <div style={{
           position:"fixed", bottom:"1.5rem", left:"50%", transform:"translateX(-50%)",
@@ -453,13 +492,14 @@ function App() {
       {view==="seating"    && (
         <SeatingView
           arrangement={arrangement} frontSeated={frontSeated}
+          cols={grid.cols} rows={grid.rows}
           onBack={()=>setView("home")} onShuffle={shuffleSeats}
         />
       )}
       {view==="attendance" && (
         <AttendanceView
           activeSessions={activeSessions} checkInTimes={checkInTimes}
-          onToggle={toggleAttendance}
+          onToggle={toggleAttendance} onCancel={cancelAttendance}
           currentTime={currentTime} data={data}
           students={students}
           onBack={()=>{
@@ -486,6 +526,7 @@ function App() {
           onSaveFront={(f)=>{ saveFront(f); setToast("✅ 앞자리 설정이 저장되었습니다"); }}
           onSaveEndTime={saveAutoEndTime}
           onSaveStudents={saveStudents}
+          onSaveGrid={saveGrid}
           onSaveFile={saveToFile}
           onBack={()=>setView("home")}
         />
@@ -510,7 +551,7 @@ function App() {
 }
 
 // ─────────────────────────────────────────────
-//  홈
+//  Home
 // ─────────────────────────────────────────────
 function HomeView({ setView, onSaveFile }) {
   return (
@@ -557,7 +598,7 @@ function HomeView({ setView, onSaveFile }) {
           </button>
         ))}
       </div>
-      {/* 수동 저장 버튼 */}
+      {/* Manual save button */}
       <button onClick={onSaveFile} style={{
         marginTop:"2rem",
         background:"rgba(255,255,255,0.1)",
@@ -573,7 +614,7 @@ function HomeView({ setView, onSaveFile }) {
 }
 
 // ─────────────────────────────────────────────
-//  자리 배치
+//  Seating
 // ─────────────────────────────────────────────
 function SeatCell({ student, isFront }) {
   const has = Boolean(student);
@@ -600,24 +641,23 @@ function SeatCell({ student, isFront }) {
   );
 }
 
-function SeatingView({ arrangement, frontSeated, onBack, onShuffle }) {
+function SeatingView({ arrangement, frontSeated, cols, rows, onBack, onShuffle }) {
   const isEmpty = arrangement.every(s=>!s);
-  const rows    = Array.from({length:5},(_,r)=>arrangement.slice(r*6,r*6+6));
+  const grid    = Array.from({length:rows},(_,r)=>arrangement.slice(r*cols,r*cols+cols));
 
-  // ── Canvas로 자리 배치도 PNG 내보내기 ──
+  // ── Export the seating chart as a PNG via Canvas ──
   const exportImage = useCallback(() => {
     const CELL_W = 110, CELL_H = 70, GAP = 8, PAD = 28;
-    const COLS = 6;
-    // 행: 5행 + 마지막 1칸 행
-    const TOTAL_ROWS = 6;
+    const COLS = cols;
+    const TOTAL_ROWS = rows;
     const DESK_H = 48;
-    const HEADER_H = 56; // 제목 영역
-    const LEGEND_H = 36; // 범례 영역
+    const HEADER_H = 56; // title area
+    const LEGEND_H = 36; // legend area
     const W = PAD*2 + COLS*(CELL_W+GAP) - GAP;
     const H = PAD*2 + HEADER_H + DESK_H + GAP + TOTAL_ROWS*(CELL_H+GAP) - GAP + LEGEND_H + 16;
 
     const canvas = document.createElement("canvas");
-    const DPR = 2; // 고해상도
+    const DPR = 2; // high resolution
     canvas.width  = W * DPR;
     canvas.height = H * DPR;
     canvas.style.width  = W + "px";
@@ -625,11 +665,11 @@ function SeatingView({ arrangement, frontSeated, onBack, onShuffle }) {
     const ctx = canvas.getContext("2d");
     ctx.scale(DPR, DPR);
 
-    // 배경
+    // background
     ctx.fillStyle = "#F0F4F8";
     ctx.fillRect(0, 0, W, H);
 
-    // 제목 배경
+    // title background
     const grad = ctx.createLinearGradient(0,0,W,0);
     grad.addColorStop(0,"#0f1b3d");
     grad.addColorStop(1,"#2563EB");
@@ -642,13 +682,13 @@ function SeatingView({ arrangement, frontSeated, onBack, onShuffle }) {
     ctx.textBaseline = "middle";
     ctx.fillText("자리 배치도", W/2, HEADER_H/2);
 
-    // 날짜
+    // date
     const today = new Date().toLocaleDateString("ko-KR",{year:"numeric",month:"2-digit",day:"2-digit"});
     ctx.font = "13px 'Malgun Gothic', sans-serif";
     ctx.fillStyle = "rgba(255,255,255,0.6)";
     ctx.fillText(today, W/2, HEADER_H/2 + 18);
 
-    // 교탁
+    // teacher's desk
     const deskY = PAD + HEADER_H;
     ctx.fillStyle = "#FEF3C7";
     ctx.strokeStyle = "#F59E0B";
@@ -661,7 +701,7 @@ function SeatingView({ arrangement, frontSeated, onBack, onShuffle }) {
     ctx.textBaseline = "middle";
     ctx.fillText("📋  교  탁", W/2, deskY + DESK_H/2);
 
-    // 자리 셀 그리기
+    // draw seat cells
     const cellTop = PAD + HEADER_H + DESK_H + GAP;
 
     const drawCell = (col, row, student, isFront) => {
@@ -670,11 +710,11 @@ function SeatingView({ arrangement, frontSeated, onBack, onShuffle }) {
       const has = Boolean(student);
 
       if (has) {
-        // 그림자
+        // shadow
         ctx.fillStyle = "rgba(0,0,0,0.07)";
         roundRect(ctx, x+2, y+2, CELL_W, CELL_H, 10);
         ctx.fill();
-        // 셀 배경
+        // cell background
         ctx.fillStyle = isFront ? "#DBEAFE" : "#F8FAFC";
         ctx.strokeStyle = isFront ? "#60A5FA" : "#E2E8F0";
         ctx.lineWidth = isFront ? 2 : 1.5;
@@ -703,17 +743,14 @@ function SeatingView({ arrangement, frontSeated, onBack, onShuffle }) {
       }
     };
 
-    // 5행 × 6열
-    rows.forEach((row, ri) => {
+    // rows x cols
+    grid.forEach((row, ri) => {
       row.forEach((student, ci) => {
         drawCell(ci, ri, student, frontSeated.includes(student));
       });
     });
-    // 마지막 1칸 (6번째 열, 6번째 행)
-    const last = arrangement[30];
-    drawCell(5, 5, last, frontSeated.includes(last));
 
-    // 범례
+    // legend
     const lgY = cellTop + TOTAL_ROWS*(CELL_H+GAP) + 4;
     const legends = [
       {bg:"#DBEAFE", bd:"#60A5FA", label:"앞자리 지정"},
@@ -734,12 +771,12 @@ function SeatingView({ arrangement, frontSeated, onBack, onShuffle }) {
       lgX += 22 + ctx.measureText(label).width + 24;
     });
 
-    // 다운로드
+    // download
     const link = document.createElement("a");
     link.download = `자리배치도_${today.replace(/\. /g,"-").replace(".","")}`.replace(/\s/g,"") + ".png";
     link.href = canvas.toDataURL("image/png");
     link.click();
-  }, [arrangement, frontSeated, rows]);
+  }, [arrangement, frontSeated, cols, rows]);
 
   return (
     <div style={{minHeight:"100vh", background:T.bg, fontFamily:T.font}}>
@@ -784,19 +821,13 @@ function SeatingView({ arrangement, frontSeated, onBack, onShuffle }) {
           </div>
         ) : (
           <div style={{overflowX:"auto"}}>
-            {rows.map((row,ri)=>(
-              <div key={ri} style={{display:"flex",gap:6,marginBottom:6}}>
+            {grid.map((row,ri)=>(
+              <div key={ri} style={{display:"flex",gap:6,marginBottom:6,justifyContent:"center"}}>
                 {row.map((s,ci)=>(
                   <SeatCell key={ci} student={s} isFront={frontSeated.includes(s)} />
                 ))}
               </div>
             ))}
-            <div style={{display:"flex",gap:6}}>
-              {Array.from({length:5}).map((_,i)=>(
-                <div key={i} style={{width:84,height:56}}/>
-              ))}
-              <SeatCell student={arrangement[30]} isFront={frontSeated.includes(arrangement[30])} />
-            </div>
           </div>
         )}
       </div>
@@ -804,7 +835,7 @@ function SeatingView({ arrangement, frontSeated, onBack, onShuffle }) {
   );
 }
 
-// Canvas 모서리 둥근 사각형 헬퍼
+// Rounded-rectangle helper for Canvas
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
   ctx.moveTo(x+r, y);
@@ -820,9 +851,9 @@ function roundRect(ctx, x, y, w, h, r) {
 }
 
 // ─────────────────────────────────────────────
-//  아침 자습 출석 뷰
+//  Morning self-study attendance view
 // ─────────────────────────────────────────────
-function AttendanceView({ activeSessions, checkInTimes, onToggle, currentTime, data, students, onBack, onRankings }) {
+function AttendanceView({ activeSessions, checkInTimes, onToggle, onCancel, currentTime, data, students, onBack, onRankings }) {
   const timeStr = currentTime.toLocaleString("ko-KR",{
     year:"numeric",month:"2-digit",day:"2-digit",
     hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false,
@@ -831,7 +862,7 @@ function AttendanceView({ activeSessions, checkInTimes, onToggle, currentTime, d
   const autoEndTime = data.auto_end_time || "08:40";
   const stuList = students || DEFAULT_STUDENTS;
 
-  // 오늘 출석한 학생의 체크인 시간 가져오기
+  // Get the check-in time for a student who attended today
   const getCheckinLabel = (student) => {
     const month = getMonthKey();
     const today = getTodayKey();
@@ -851,7 +882,7 @@ function AttendanceView({ activeSessions, checkInTimes, onToggle, currentTime, d
           <div style={{fontSize:"clamp(0.95rem,2.5vw,1.35rem)",fontWeight:900,
             color:"#DC2626",fontVariantNumeric:"tabular-nums"}}>{timeStr}</div>
         </div>
-        {/* 종료 시간 배지 */}
+        {/* End-time badge */}
         <div style={{
           background:"#FFF7ED", border:"1.5px solid #FDBA74",
           borderRadius:10, padding:"0.3rem 1.2rem", textAlign:"center",
@@ -874,7 +905,7 @@ function AttendanceView({ activeSessions, checkInTimes, onToggle, currentTime, d
         <button onClick={onRankings} style={btn(T.purple)}>🏆 월별 순위</button>
       </div>
 
-      {/* 학생 버튼 그리드 */}
+      {/* Student button grid */}
       <div style={{
         padding:"1.2rem", display:"grid",
         gridTemplateColumns:"repeat(auto-fill,minmax(105px,1fr))",
@@ -889,6 +920,7 @@ function AttendanceView({ activeSessions, checkInTimes, onToggle, currentTime, d
             : null;
           return (
             <button key={student} onClick={()=>onToggle(student)} className="stu-btn" style={{
+              position:"relative",
               background: active ? T.green : doneToday ? "#DCFCE7" : "#F8FAFC",
               color:       active ? "#fff"  : doneToday ? T.greenDk : T.text,
               border:`2px solid ${active ? T.greenDk : doneToday ? "#86EFAC" : T.border}`,
@@ -898,6 +930,19 @@ function AttendanceView({ activeSessions, checkInTimes, onToggle, currentTime, d
               display:"flex", flexDirection:"column", alignItems:"center", gap:"0.2rem",
               opacity: doneToday ? 0.85 : 1,
             }}>
+              {active && (
+                <span
+                  onClick={(e)=>{ e.stopPropagation(); onCancel(student); }}
+                  title="자습 시작 취소 (기록 안 됨)"
+                  style={{
+                    position:"absolute", top:3, right:3,
+                    width:22, height:22, borderRadius:"50%",
+                    background:"rgba(255,255,255,0.92)", color:T.greenDk,
+                    fontSize:"0.78rem", fontWeight:900, lineHeight:"22px",
+                    textAlign:"center", boxShadow:"0 1px 3px rgba(0,0,0,0.25)",
+                  }}
+                >✕</span>
+              )}
               {student}
               {active && (
                 <span style={{fontSize:"0.66rem",fontWeight:500,
@@ -928,7 +973,7 @@ function AttendanceView({ activeSessions, checkInTimes, onToggle, currentTime, d
 
       {activeCount > 0 && (
         <p style={{textAlign:"center",color:T.muted,fontSize:"0.8rem",paddingBottom:"1.5rem"}}>
-          버튼을 다시 누르면 종료되고 기록됩니다
+          버튼을 다시 누르면 종료되고 기록됩니다 · 오른쪽 위 ✕ 를 누르면 시작이 취소됩니다 (기록 안 됨)
         </p>
       )}
     </div>
@@ -936,7 +981,7 @@ function AttendanceView({ activeSessions, checkInTimes, onToggle, currentTime, d
 }
 
 // ─────────────────────────────────────────────
-//  출석 현황표 뷰 (월별 테이블)
+//  Attendance status view (monthly table)
 // ─────────────────────────────────────────────
 function AttendanceTableView({ attendance, attendanceTimes, students, onBack }) {
   const stuList = students || DEFAULT_STUDENTS;
@@ -1139,7 +1184,7 @@ function AttendanceTableView({ attendance, attendanceTimes, students, onBack }) 
             </table>
           </div>
 
-          {/* 범례 */}
+          {/* Legend */}
           <div className="no-print" style={{
             padding:"0.75rem 1.2rem", borderTop:`1px solid ${T.border}`,
             display:"flex", gap:"1.2rem", flexWrap:"wrap", alignItems:"center",
@@ -1170,13 +1215,14 @@ function AttendanceTableView({ attendance, attendanceTimes, students, onBack }) 
 }
 
 // ─────────────────────────────────────────────
-//  설정 뷰 (전체 페이지)
+//  Settings view (full page)
 // ─────────────────────────────────────────────
-function SettingsView({ data, students, onSaveFront, onSaveEndTime, onSaveStudents, onSaveFile, onBack }) {
+function SettingsView({ data, students, onSaveFront, onSaveEndTime, onSaveStudents, onSaveGrid, onSaveFile, onBack }) {
   const [tab, setTab] = useState("endtime");
 
   const tabs = [
     { v:"endtime",  l:"⏱ 종료 시간" },
+    { v:"grid",     l:"🧩 자리 배치" },
     { v:"front",    l:"🪑 앞자리 설정" },
     { v:"students", l:"👥 학생 명단" },
     { v:"save",     l:"💾 파일 저장" },
@@ -1184,7 +1230,7 @@ function SettingsView({ data, students, onSaveFront, onSaveEndTime, onSaveStuden
 
   return (
     <div style={{minHeight:"100vh", background:T.bg, fontFamily:T.font}}>
-      {/* 헤더 */}
+      {/* Header */}
       <div style={{
         background:T.surface, borderBottom:`1px solid ${T.border}`,
         padding:"0.85rem 1.2rem", display:"flex", alignItems:"center", gap:"0.7rem",
@@ -1196,7 +1242,7 @@ function SettingsView({ data, students, onSaveFront, onSaveEndTime, onSaveStuden
         </h2>
       </div>
 
-      {/* 탭 */}
+      {/* Tabs */}
       <div style={{
         background:T.surface, borderBottom:`1px solid ${T.border}`,
         padding:"0.5rem 0.8rem", display:"flex", gap:"0.4rem", overflowX:"auto",
@@ -1215,6 +1261,7 @@ function SettingsView({ data, students, onSaveFront, onSaveEndTime, onSaveStuden
 
       <div style={{maxWidth:640, margin:"0 auto", padding:"1.5rem 1rem"}}>
         {tab==="endtime" && <EndTimeSetting autoEndTime={data.auto_end_time||"08:40"} onSave={onSaveEndTime} />}
+        {tab==="grid"    && <GridSetting cols={data.seat_cols||DEFAULT_COLS} rows={data.seat_rows||DEFAULT_ROWS} studentCount={(students||DEFAULT_STUDENTS).length} onSave={onSaveGrid} />}
         {tab==="front"   && <FrontSetting frontStudents={data.front_students} students={students} onSave={onSaveFront} />}
         {tab==="students"&& <StudentListSetting students={students} onSave={onSaveStudents} />}
         {tab==="save"    && <FileSaveSetting onSave={onSaveFile} />}
@@ -1223,7 +1270,70 @@ function SettingsView({ data, students, onSaveFront, onSaveEndTime, onSaveStuden
   );
 }
 
-// ── 종료 시간 설정 패널 ──
+// ── Seat grid size settings panel ──
+function GridSetting({ cols, rows, studentCount, onSave }) {
+  const [c, setC] = useState(cols);
+  const [r, setR] = useState(rows);
+  const effectiveCols = Math.max(c, Math.ceil(studentCount / r));
+  const seatCount = effectiveCols * r;
+  const colOpts = Array.from({length:10},(_,i)=>i+3); // 3-12 columns
+  const rowOpts = Array.from({length:8},(_,i)=>i+3);  // 3-10 rows
+
+  const sel = {
+    fontSize:"1.7rem", fontWeight:900, color:T.text,
+    border:`2px solid ${T.primary}`, borderRadius:12,
+    padding:"0.45rem 0.4rem", background:"#fff",
+    fontFamily:T.font, outline:"none", textAlign:"center",
+    width:84, cursor:"pointer", appearance:"none", WebkitAppearance:"none",
+    textAlignLast:"center",
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:"1.2rem"}}>
+      <div style={{background:"#fff",borderRadius:14,padding:"1.5rem",
+        boxShadow:"0 2px 12px rgba(0,0,0,0.07)",border:`1px solid ${T.border}`}}>
+        <h3 style={{fontWeight:800,fontSize:"1rem",color:T.text,marginBottom:"0.4rem"}}>🧩 자리 배치 크기</h3>
+        <p style={{fontSize:"0.8rem",color:T.muted,marginBottom:"1.2rem"}}>
+          기본값은 6열 × 5행입니다. 학생 수가 좌석보다 많아지면 열이 자동으로 늘어납니다.
+        </p>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:"1rem",
+          background:"#F0F9FF",borderRadius:12,padding:"1.4rem",border:"1.5px solid #BAE6FD"}}>
+          <div style={{display:"flex",alignItems:"flex-end",gap:"0.7rem"}}>
+            <div style={{textAlign:"center"}}>
+              <div style={{fontSize:"0.8rem",color:"#0369A1",fontWeight:700,marginBottom:"0.4rem"}}>열 (가로)</div>
+              <select value={c} onChange={e=>setC(Number(e.target.value))} style={sel}>
+                {colOpts.map(n=><option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+            <span style={{fontSize:"1.7rem",fontWeight:900,color:T.text,paddingBottom:"0.5rem"}}>×</span>
+            <div style={{textAlign:"center"}}>
+              <div style={{fontSize:"0.8rem",color:"#0369A1",fontWeight:700,marginBottom:"0.4rem"}}>행 (세로)</div>
+              <select value={r} onChange={e=>setR(Number(e.target.value))} style={sel}>
+                {rowOpts.map(n=><option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+          </div>
+          <p style={{fontSize:"0.8rem",color:T.muted,textAlign:"center"}}>
+            실제 배치: <strong style={{color:T.primary}}>{effectiveCols}열 × {r}행 = {seatCount}석</strong>
+            {" "}(학생 {studentCount}명)
+            {effectiveCols>c && (
+              <><br/><span style={{color:T.amber,fontWeight:700}}>학생 수에 맞춰 열이 자동 확장되었습니다</span></>
+            )}
+          </p>
+        </div>
+        <div style={{background:"#FEF9C3",borderRadius:10,padding:"0.8rem 1rem",
+          border:"1px solid #FDE047",fontSize:"0.8rem",color:"#854D0E",marginTop:"1rem"}}>
+          💡 크기를 바꾸면 현재 자리 배치는 초기화됩니다. "자리 배치하기"를 다시 눌러 새로 배치하세요.
+        </div>
+        <div style={{display:"flex",justifyContent:"flex-end",marginTop:"1.2rem"}}>
+          <button onClick={()=>onSave(c, r)} style={btn(T.primary)}>✓ 저장</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── End-time settings panel ──
 function EndTimeSetting({ autoEndTime, onSave }) {
   const [hh, setHh] = useState(() => (autoEndTime||"08:40").split(":")[0]);
   const [mm, setMm] = useState(() => (autoEndTime||"08:40").split(":")[1]);
@@ -1277,7 +1387,7 @@ function EndTimeSetting({ autoEndTime, onSave }) {
   );
 }
 
-// ── 앞자리 설정 패널 ──
+// ── Front-seat settings panel ──
 function FrontSetting({ frontStudents, students, onSave }) {
   const stuList = students || DEFAULT_STUDENTS;
   const [listAll,   setListAll]  = useState(()=>stuList.filter(s=>!frontStudents.includes(s)).sort());
@@ -1348,7 +1458,7 @@ function FrontSetting({ frontStudents, students, onSave }) {
   );
 }
 
-// ── 학생 명단 수정 패널 ──
+// ── Student list editor panel ──
 function StudentListSetting({ students, onSave }) {
   const stuList = students || DEFAULT_STUDENTS;
   const [listText, setListText] = useState(()=>stuList.join("\n"));
@@ -1432,7 +1542,7 @@ function StudentListSetting({ students, onSave }) {
                 </div>
               ))}
             </div>
-            {/* 학생 추가 */}
+            {/* Add student */}
             <div style={{display:"flex",gap:"0.5rem",marginTop:"0.8rem"}}>
               <input
                 value={newName}
@@ -1468,7 +1578,7 @@ function StudentListSetting({ students, onSave }) {
   );
 }
 
-// ── 파일 저장 패널 ──
+// ── File save panel ──
 function FileSaveSetting({ onSave }) {
   const today = new Date();
   const filename = getTodayFilename(today);
@@ -1506,7 +1616,7 @@ function FileSaveSetting({ onSave }) {
 }
 
 // ─────────────────────────────────────────────
-//  월별 순위 모달
+//  Monthly ranking modal
 // ─────────────────────────────────────────────
 function RankingsModal({ attendance, onClose, onReset, onExport, onImport }) {
   const [tab,          setTab]          = useState("count");
@@ -1631,7 +1741,7 @@ function RankingsModal({ attendance, onClose, onReset, onExport, onImport }) {
 }
 
 // ─────────────────────────────────────────────
-//  공용 Overlay
+//  Shared Overlay
 // ─────────────────────────────────────────────
 function Overlay({ children, onClose, wide }) {
   return (
@@ -1659,7 +1769,7 @@ function Overlay({ children, onClose, wide }) {
 }
 
 // ─────────────────────────────────────────────
-//  마운트
+//  Mount
 // ─────────────────────────────────────────────
 ReactDOM.createRoot(document.getElementById("root")).render(<App />);
 </script>

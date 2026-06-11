@@ -38,7 +38,7 @@ public class MainActivity extends Activity {
 
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
-        s.setDomStorageEnabled(true);          // localStorage (모든 설정 기기 저장)
+        s.setDomStorageEnabled(true);          // localStorage (persist all settings on-device)
         s.setDatabaseEnabled(true);
         s.setAllowFileAccess(true);
         s.setAllowContentAccess(true);
@@ -91,7 +91,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onStop() {
         super.onStop();
-        // 앱이 백그라운드로 갈 때 오늘 날짜 파일 자동 저장(원본 beforeunload 동작 유지)
+        // Auto-save today's file when the app goes to background (preserves original beforeunload behavior)
         if (webView != null) {
             webView.evaluateJavascript(
                 "window.dispatchEvent(new Event('beforeunload'));", null);
@@ -108,7 +108,7 @@ public class MainActivity extends Activity {
     }
 
     // ─────────────────────────────────────────────
-    //  JS ↔ Android 브릿지
+    //  JS ↔ Android bridge
     // ─────────────────────────────────────────────
     private class Bridge {
 
@@ -156,7 +156,7 @@ public class MainActivity extends Activity {
         Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
         String relPath = Environment.DIRECTORY_DOWNLOADS + "/학급관리";
 
-        // 같은 이름 파일이 있으면 덮어쓰기(원본의 "같은 날짜 파일은 덮어씌워집니다" 동작)
+        // Overwrite if a file with the same name exists (matches original "same-date file is overwritten" behavior)
         Uri target = null;
         Cursor c = resolver.query(
                 collection,
