@@ -174,13 +174,8 @@ const formatHHMM  = (date) => {
   const m = String(date.getMinutes()).padStart(2,"0");
   return `${h}:${m}`;
 };
-// Today's filename format (morning self-study attendance - Y/M/D)
-const getTodayFilename = (d = new Date()) => {
-  const y = d.getFullYear();
-  const mo = String(d.getMonth()+1).padStart(2,"0");
-  const day = String(d.getDate()).padStart(2,"0");
-  return `아침자습출석 - ${y}/${mo}/${day}`;
-};
+// Fixed filename so every save overwrites the single backup file
+const getTodayFilename = () => `학급관리_데이터`;
 
 // Return all dates in the month (array of YYYY-MM-DD)
 const getDaysInMonth = (monthKey) => {
@@ -1579,8 +1574,12 @@ function StudentListSetting({ students, onSave }) {
         )}
 
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:"1rem"}}>
-          <button onClick={()=>{ setListText(DEFAULT_STUDENTS.join("\n")); }}
-            style={btn("#94A3B8",{fontSize:"0.8rem"})}>기본값으로 초기화</button>
+          <button onClick={()=>{
+            if (!window.confirm("학생 명단을 학생1~학생30으로 초기화할까요?")) return;
+            setListText(DEFAULT_STUDENTS.join("\n"));
+            setEditMode(false);
+            onSave(DEFAULT_STUDENTS);
+          }} style={btn("#94A3B8",{fontSize:"0.8rem"})}>기본값으로 초기화</button>
           <button onClick={()=>{ onSave(parsed); setEditMode(false); }}
             style={btn(T.primary)}>✓ 저장 ({parsed.length}명)</button>
         </div>
@@ -1598,14 +1597,13 @@ function StudentListSetting({ students, onSave }) {
 
 // ── File save panel ──
 function FileSaveSetting({ onSave }) {
-  const today = new Date();
-  const filename = getTodayFilename(today);
+  const filename = getTodayFilename();
   return (
     <div style={{background:"#fff",borderRadius:14,padding:"1.5rem",
       boxShadow:"0 2px 12px rgba(0,0,0,0.07)",border:`1px solid ${T.border}`}}>
       <h3 style={{fontWeight:800,fontSize:"1rem",color:T.text,marginBottom:"0.3rem"}}>💾 파일로 저장</h3>
       <p style={{fontSize:"0.8rem",color:T.muted,marginBottom:"1.2rem"}}>
-        자습 기록을 파일로 내보냅니다. 같은 날짜 파일은 덮어씌워집니다.
+        자습 기록을 파일로 내보냅니다. 저장할 때마다 같은 파일을 덮어씌웁니다.
       </p>
       <div style={{
         background:"#F0F9FF",borderRadius:12,padding:"1.2rem",
@@ -1622,7 +1620,7 @@ function FileSaveSetting({ onSave }) {
       </div>
       <div style={{background:"#F0FDF4",borderRadius:10,padding:"0.8rem 1rem",
         border:"1px solid #86EFAC",fontSize:"0.8rem",color:"#15803D",marginBottom:"1.2rem"}}>
-        ✅ 브라우저를 닫을 때도 오늘 날짜 파일로 자동 저장됩니다.
+        ✅ 앱을 닫을 때도 같은 파일로 자동 저장됩니다.
       </div>
       <button onClick={onSave} style={{
         ...btn(T.primary), width:"100%", padding:"0.8rem", fontSize:"1rem",
