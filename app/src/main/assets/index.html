@@ -92,14 +92,74 @@ const DEFAULT_ROWS = 5;   // Default number of rows (vertical)
 const FRONT_COUNT  = 12;  // Number of front-row seats
 
 // Compute the seat grid based on the number of students.
-// Rows stay fixed at the configured value; columns auto-expand when students exceed seats.
+// Columns stay fixed at the configured value; rows grow toward the back when
+// the class outgrows the room (a transfer student adds a desk at the back).
 const getGrid = (data) => {
-  const rows     = data.seat_rows || DEFAULT_ROWS;
-  const baseCols = data.seat_cols || DEFAULT_COLS;
+  const cols     = data.seat_cols || DEFAULT_COLS;
+  const baseRows = data.seat_rows || DEFAULT_ROWS;
   const n        = (data.students || DEFAULT_STUDENTS).length;
-  const cols     = Math.max(baseCols, Math.ceil(n / rows));
+  const rows     = Math.max(baseRows, Math.ceil(n / cols));
   return { rows, cols, count: rows * cols };
 };
+
+// Build a fresh compact random arrangement (the "lottery").
+// Front-designated students get random seats in the front block; everyone else
+// is packed into the lowest-numbered empty desks (front-to-back), so the room
+// fills solidly from the front and any spare desks are left at the back.
+function buildSeating(data) {
+  const sts   = data.students || DEFAULT_STUDENTS;
+  const { count } = getGrid(data);
+  const n          = Math.min(sts.length, count);
+  const frontBlock = Math.min(FRONT_COUNT, n);   // front desks actually in use
+  const frontStudents = shuffle((data.front_students || []).filter(s => sts.includes(s)));
+  const others        = shuffle(sts.filter(s => !frontStudents.includes(s)));
+  const arr           = Array(count).fill("");
+  // front-designated students get random desks within the front block
+  const frontSeats    = shuffle(Array.from({ length: frontBlock }, (_, i) => i));
+  for (const s of frontStudents) {
+    if (frontSeats.length) arr[frontSeats.pop()] = s;
+    else others.push(s);            // front overflow -> packed with everyone else
+  }
+  // pack the rest into the lowest empty desks so seats 0..n-1 fill solidly (no middle gaps)
+  let idx = 0;
+  for (const s of others) {
+    while (idx < n && arr[idx] !== "") idx++;
+    if (idx < n) arr[idx++] = s;
+  }
+  return arr;
+}
+
+// Re-fit an existing arrangement to the current roster without a full reshuffle:
+//  - students no longer on the roster have their desks blanked
+//  - interior gaps are closed by pulling the back-most student forward
+//  - the grid is resized to the roster (rows grow/shrink at the back)
+//  - newly added students take the next empty desks at the back, in roster order
+function reflowSeating(oldArr, data) {
+  const sts     = data.students || DEFAULT_STUDENTS;
+  const present = new Set(sts);
+  const { count } = getGrid(data);
+  let arr = (oldArr || []).map(name => (present.has(name) ? name : ""));
+  // close interior gaps: move the back-most occupied desk into the earliest empty one
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i] === "") {
+      let j = arr.length - 1;
+      while (j > i && arr[j] === "") j--;
+      if (j > i) { arr[i] = arr[j]; arr[j] = ""; }
+    }
+  }
+  // resize to the roster's grid
+  if (arr.length < count) arr = arr.concat(Array(count - arr.length).fill(""));
+  else if (arr.length > count) arr = arr.slice(0, count);
+  // seat any students not yet placed into the next empty desks (back), in roster order
+  const seated = new Set(arr.filter(Boolean));
+  let idx = 0;
+  for (const s of sts) {
+    if (seated.has(s)) continue;
+    while (idx < arr.length && arr[idx] !== "") idx++;
+    if (idx < arr.length) { arr[idx++] = s; seated.add(s); }
+  }
+  return arr;
+}
 
 // ─────────────────────────────────────────────
 //  Utils
@@ -163,6 +223,7 @@ const loadData = () => {
       if (!parsed.attendance_times) parsed.attendance_times = {};
       if (!parsed.seat_cols) parsed.seat_cols = DEFAULT_COLS;
       if (!parsed.seat_rows) parsed.seat_rows = DEFAULT_ROWS;
+      if (!Array.isArray(parsed.seating)) parsed.seating = [];
       return parsed;
     }
   } catch(_) {}
@@ -175,6 +236,7 @@ const loadData = () => {
     auto_end_time: "08:40",
     seat_cols: DEFAULT_COLS,
     seat_rows: DEFAULT_ROWS,
+    seating: [],
   };
 };
 
@@ -241,8 +303,6 @@ const btn = (bg="#3B6FE8", opts={}) => ({
 function App() {
   const [view,           setView]          = useState("home");
   const [data,           setData]          = useState(() => loadData());
-  const [arrangement,    setArrangement]   = useState(() => Array(getGrid(loadData()).count).fill(""));
-  const [frontSeated,    setFrontSeated]   = useState([]);
   const [activeSessions, setActiveSessions]= useState(() => loadSessions().activeSessions);
   const [checkInTimes,   setCheckInTimes]  = useState(() => loadSessions().checkInTimes);  // student -> Date.now() check-in timestamp
   const [currentTime,    setCurrentTime]   = useState(new Date());
@@ -251,18 +311,15 @@ function App() {
   const autoEndRef = useRef("");
   const dataRef    = useRef(data);
 
-  // Derive students / seat grid from data
-  const students = data.students || DEFAULT_STUDENTS;
-  const grid     = getGrid(data);
+  // Derive students / seat grid / seating from data (seating is persisted in storage)
+  const students   = data.students || DEFAULT_STUDENTS;
+  const grid       = getGrid(data);
+  const seating    = Array.isArray(data.seating) ? data.seating : [];
+  const frontSet   = data.front_students || [];
+  const frontSeated= seating.filter(s => frontSet.includes(s));
 
   useEffect(() => { dataRef.current = data; saveData(data); }, [data]);
   useEffect(() => { saveSessions(activeSessions, checkInTimes); }, [activeSessions, checkInTimes]);
-
-  // When the student list changes, clear the seating so new students are reflected (re-tap "Arrange seats" to apply).
-  useEffect(() => {
-    setArrangement(Array(getGrid(dataRef.current).count).fill(""));
-    setFrontSeated([]);
-  }, [students]);
 
   // ── Auto-save file before exit ──
   useEffect(() => {
@@ -329,37 +386,19 @@ function App() {
   }, [currentTime]);
 
   // Shuffle seats
+  // Full reshuffle ("자리 배치하기"): compact random arrangement, persisted in data
   const shuffleSeats = useCallback(() => {
-    const sts = dataRef.current.students || DEFAULT_STUDENTS;
-    const { count } = getGrid(dataRef.current);
-    const front   = shuffle((dataRef.current.front_students || []).filter(s => sts.includes(s)));
-    const normal  = shuffle(sts.filter(s => !front.includes(s)));
-    const frontIdx= shuffle(Array.from({length:Math.min(FRONT_COUNT, count)},(_,i)=>i));
-    const arr     = Array(count).fill("");
-    const placed  = [], overflow = [];
-    for (const s of front) {
-      if (frontIdx.length) { arr[frontIdx.pop()] = s; placed.push(s); }
-      else overflow.push(s);
-    }
-    const emptyIdx = shuffle(arr.map((v,i)=>v===""?i:-1).filter(i=>i>=0));
-    for (const s of [...normal,...overflow]) { if (emptyIdx.length) arr[emptyIdx.pop()] = s; }
-    setArrangement(arr);
-    setFrontSeated(placed);
+    setData({ ...dataRef.current, seating: buildSeating(dataRef.current) });
   }, []);
 
-  // Self-study toggle (once per day)
+  // Self-study toggle: first press = check in, second press = cancel the check-in.
+  // Nothing is recorded here — attendance is finalized at the auto-end time.
   const toggleAttendance = useCallback((student) => {
     if (activeSessions[student] != null) {
-      // End
-      const st  = activeSessions[student];
-      const dur = Math.floor((Date.now() - st) / 1000);
-      const now = new Date();
-      const ciDate = checkInTimes[student] ? new Date(checkInTimes[student]) : new Date(st);
-      const d = addRecord(dataRef.current, student, dur, getMonthKey(now), getTodayKey(now), formatHHMM(ciDate));
-      setData(d);
+      // Cancel the check-in (not recorded)
       setActiveSessions(prev => { const n={...prev}; delete n[student]; return n; });
-      setCheckInTimes(prev => { const n={...prev}; delete n[student]; return n; });
-      setToast(`✅ ${student} 자습 완료 · ${formatTime(dur)}`);
+      setCheckInTimes(prev  => { const n={...prev}; delete n[student]; return n; });
+      setToast(`↩ ${student} 입실 취소됨 (기록되지 않음)`);
     } else {
       // Block if already attended today
       if (hasAttendedToday(dataRef.current, student)) {
@@ -370,32 +409,27 @@ function App() {
       setActiveSessions(prev => ({...prev, [student]: now}));
       setCheckInTimes(prev  => ({...prev, [student]: now}));
     }
-  }, [activeSessions, checkInTimes]);
-
-  // Cancel a self-study start (pressed by mistake — remove the session without recording)
-  const cancelAttendance = useCallback((student) => {
-    setActiveSessions(prev => { const n={...prev}; delete n[student]; return n; });
-    setCheckInTimes(prev  => { const n={...prev}; delete n[student]; return n; });
-    setToast(`↩ ${student} 자습 시작 취소됨 (기록되지 않음)`);
-  }, []);
+  }, [activeSessions]);
 
   const saveFront = useCallback((front) => {
     const d = {...dataRef.current, front_students: front};
     setData(d);
   }, []);
 
-  // Save seat grid size (columns/rows)
+  // Save seat grid size (columns/rows). Changing the room layout resets the arrangement.
   const saveGrid = useCallback((cols, rows) => {
-    const d = {...dataRef.current, seat_cols: cols, seat_rows: rows};
-    setData(d);
-    setArrangement(Array(getGrid(d).count).fill(""));
-    setFrontSeated([]);
+    setData({ ...dataRef.current, seat_cols: cols, seat_rows: rows, seating: [] });
     setToast(`✅ 자리 배치가 ${cols}열 × ${rows}행으로 설정되었습니다`);
   }, []);
 
   const saveStudents = useCallback((newStudents) => {
-    const d = {...dataRef.current, students: newStudents};
-    setData(d);
+    const cur     = dataRef.current;
+    const front   = (cur.front_students || []).filter(s => newStudents.includes(s));
+    const hadSeat = Array.isArray(cur.seating) && cur.seating.some(Boolean);
+    const next    = { ...cur, students: newStudents, front_students: front };
+    // Keep existing seats: transfer students go to the back, leavers' gaps are pulled forward.
+    next.seating  = hadSeat ? reflowSeating(cur.seating, next) : (cur.seating || []);
+    setData(next);
     setToast(`✅ 학생 명단이 저장되었습니다 (${newStudents.length}명)`);
   }, []);
 
@@ -491,7 +525,7 @@ function App() {
       {view==="home"       && <HomeView setView={setView} onSaveFile={saveToFile} />}
       {view==="seating"    && (
         <SeatingView
-          arrangement={arrangement} frontSeated={frontSeated}
+          arrangement={seating} frontSeated={frontSeated}
           cols={grid.cols} rows={grid.rows}
           onBack={()=>setView("home")} onShuffle={shuffleSeats}
         />
@@ -499,7 +533,7 @@ function App() {
       {view==="attendance" && (
         <AttendanceView
           activeSessions={activeSessions} checkInTimes={checkInTimes}
-          onToggle={toggleAttendance} onCancel={cancelAttendance}
+          onToggle={toggleAttendance}
           currentTime={currentTime} data={data}
           students={students}
           onBack={()=>{
@@ -853,7 +887,7 @@ function roundRect(ctx, x, y, w, h, r) {
 // ─────────────────────────────────────────────
 //  Morning self-study attendance view
 // ─────────────────────────────────────────────
-function AttendanceView({ activeSessions, checkInTimes, onToggle, onCancel, currentTime, data, students, onBack, onRankings }) {
+function AttendanceView({ activeSessions, checkInTimes, onToggle, currentTime, data, students, onBack, onRankings }) {
   const timeStr = currentTime.toLocaleString("ko-KR",{
     year:"numeric",month:"2-digit",day:"2-digit",
     hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false,
@@ -930,19 +964,6 @@ function AttendanceView({ activeSessions, checkInTimes, onToggle, onCancel, curr
               display:"flex", flexDirection:"column", alignItems:"center", gap:"0.2rem",
               opacity: doneToday ? 0.85 : 1,
             }}>
-              {active && (
-                <span
-                  onClick={(e)=>{ e.stopPropagation(); onCancel(student); }}
-                  title="자습 시작 취소 (기록 안 됨)"
-                  style={{
-                    position:"absolute", top:3, right:3,
-                    width:22, height:22, borderRadius:"50%",
-                    background:"rgba(255,255,255,0.92)", color:T.greenDk,
-                    fontSize:"0.78rem", fontWeight:900, lineHeight:"22px",
-                    textAlign:"center", boxShadow:"0 1px 3px rgba(0,0,0,0.25)",
-                  }}
-                >✕</span>
-              )}
               {student}
               {active && (
                 <span style={{fontSize:"0.66rem",fontWeight:500,
@@ -973,7 +994,7 @@ function AttendanceView({ activeSessions, checkInTimes, onToggle, onCancel, curr
 
       {activeCount > 0 && (
         <p style={{textAlign:"center",color:T.muted,fontSize:"0.8rem",paddingBottom:"1.5rem"}}>
-          버튼을 다시 누르면 종료되고 기록됩니다 · 오른쪽 위 ✕ 를 누르면 시작이 취소됩니다 (기록 안 됨)
+          버튼을 다시 누르면 입실이 취소됩니다 · 출석은 자동 종료 시간에 자동으로 기록됩니다
         </p>
       )}
     </div>
@@ -1274,8 +1295,8 @@ function SettingsView({ data, students, onSaveFront, onSaveEndTime, onSaveStuden
 function GridSetting({ cols, rows, studentCount, onSave }) {
   const [c, setC] = useState(cols);
   const [r, setR] = useState(rows);
-  const effectiveCols = Math.max(c, Math.ceil(studentCount / r));
-  const seatCount = effectiveCols * r;
+  const effectiveRows = Math.max(r, Math.ceil(studentCount / c));
+  const seatCount = c * effectiveRows;
   const colOpts = Array.from({length:10},(_,i)=>i+3); // 3-12 columns
   const rowOpts = Array.from({length:8},(_,i)=>i+3);  // 3-10 rows
 
@@ -1294,7 +1315,7 @@ function GridSetting({ cols, rows, studentCount, onSave }) {
         boxShadow:"0 2px 12px rgba(0,0,0,0.07)",border:`1px solid ${T.border}`}}>
         <h3 style={{fontWeight:800,fontSize:"1rem",color:T.text,marginBottom:"0.4rem"}}>🧩 자리 배치 크기</h3>
         <p style={{fontSize:"0.8rem",color:T.muted,marginBottom:"1.2rem"}}>
-          기본값은 6열 × 5행입니다. 학생 수가 좌석보다 많아지면 열이 자동으로 늘어납니다.
+          기본값은 6열 × 5행입니다. 학생 수가 좌석보다 많아지면 뒤쪽으로 행이 자동으로 늘어납니다.
         </p>
         <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:"1rem",
           background:"#F0F9FF",borderRadius:12,padding:"1.4rem",border:"1.5px solid #BAE6FD"}}>
@@ -1314,10 +1335,10 @@ function GridSetting({ cols, rows, studentCount, onSave }) {
             </div>
           </div>
           <p style={{fontSize:"0.8rem",color:T.muted,textAlign:"center"}}>
-            실제 배치: <strong style={{color:T.primary}}>{effectiveCols}열 × {r}행 = {seatCount}석</strong>
+            실제 배치: <strong style={{color:T.primary}}>{c}열 × {effectiveRows}행 = {seatCount}석</strong>
             {" "}(학생 {studentCount}명)
-            {effectiveCols>c && (
-              <><br/><span style={{color:T.amber,fontWeight:700}}>학생 수에 맞춰 열이 자동 확장되었습니다</span></>
+            {effectiveRows>r && (
+              <><br/><span style={{color:T.amber,fontWeight:700}}>학생 수에 맞춰 뒤쪽 행이 자동 확장되었습니다</span></>
             )}
           </p>
         </div>
