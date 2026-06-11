@@ -1,0 +1,1667 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>학급 관리 프로그램</title>
+  <script src="react.development.js"></script>
+  <script src="react-dom.development.js"></script>
+  <script src="babel.min.js"></script>
+  <script src="xlsx.full.min.js"></script>
+  <style>
+    @font-face { font-family: 'Noto Sans KR'; font-style: normal; font-weight: 400; font-display: swap; src: url('fonts/korean-400-normal.woff2') format('woff2'); }
+    @font-face { font-family: 'Noto Sans KR'; font-style: normal; font-weight: 500; font-display: swap; src: url('fonts/korean-500-normal.woff2') format('woff2'); }
+    @font-face { font-family: 'Noto Sans KR'; font-style: normal; font-weight: 700; font-display: swap; src: url('fonts/korean-700-normal.woff2') format('woff2'); }
+    @font-face { font-family: 'Noto Sans KR'; font-style: normal; font-weight: 900; font-display: swap; src: url('fonts/korean-900-normal.woff2') format('woff2'); }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #F0F4F8; font-family: 'Noto Sans KR', 'Malgun Gothic', sans-serif; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
+    button { cursor: pointer; transition: filter .15s, transform .12s; }
+    button:hover { filter: brightness(1.08); }
+    button:active { transform: scale(.97); }
+    .seat-cell { transition: background .2s, box-shadow .2s; }
+    .stu-btn   { transition: background .15s, box-shadow .15s; }
+
+    /* 출석표 스타일 */
+    .att-table { border-collapse: collapse; font-size: 0.78rem; font-family: 'Noto Sans KR', sans-serif; }
+    .att-table th, .att-table td { border: 1px solid #CBD5E1; padding: 0.35rem 0.5rem; white-space: nowrap; }
+    .att-table th { background: #1E3A8A; color: #fff; font-weight: 700; text-align: center; position: sticky; top: 0; z-index: 2; }
+    .att-table th.name-col { left: 0; z-index: 3; background: #1E3A8A; }
+    .att-table td.name-col { position: sticky; left: 0; background: #F8FAFC; font-weight: 700; z-index: 1; }
+    .att-table tr:nth-child(even) td { background: #F8FAFC; }
+    .att-table tr:nth-child(even) td.name-col { background: #EFF6FF; }
+    .att-cell-yes { background: #22C55E !important; color: #fff; font-weight: 800; text-align: center; border-radius: 3px; }
+    .att-cell-no  { background: #FEE2E2 !important; color: #EF4444; text-align: center; }
+    .att-cell-future { background: #F1F5F9 !important; color: #CBD5E1; text-align: center; }
+
+    @media print {
+      .no-print { display: none !important; }
+      .att-table th { background: #1E3A8A !important; color: #fff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      .att-cell-yes { background: #22C55E !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+/* ── 네이티브 브릿지: 파일 저장/인쇄를 안드로이드로 연결 (앱 로직은 그대로) ── */
+(function(){
+  function saveBlob(filename, blob){
+    var r = new FileReader();
+    r.onload = function(){
+      var s = r.result || "";
+      var i = s.indexOf(",");
+      try { AndroidFile.saveBase64(filename, i>=0?s.substring(i+1):s, blob.type || "application/octet-stream"); } catch(e){}
+    };
+    r.readAsDataURL(blob);
+  }
+  var origClick = HTMLAnchorElement.prototype.click;
+  HTMLAnchorElement.prototype.click = function(){
+    try {
+      var dl = this.download, href = this.href || "";
+      if (dl && (href.indexOf("blob:")===0 || href.indexOf("data:")===0)) {
+        var self = this;
+        fetch(href).then(function(r){ return r.blob(); })
+                   .then(function(b){ saveBlob(dl, b); })
+                   .catch(function(){ origClick.call(self); });
+        return;
+      }
+    } catch(e){}
+    return origClick.apply(this, arguments);
+  };
+  window.print = function(){ try { AndroidFile.printPage(); } catch(e){} };
+})();
+</script>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+// ─────────────────────────────────────────────
+//  상수
+// ─────────────────────────────────────────────
+const DEFAULT_STUDENTS = [
+  "강다은","강제서","강경현","고준혁","김민찬","김민채","김성래","김시연",
+  "김이니","김준수","박시우","박차연","박지환","박현진","신효진","오주원",
+  "우희준","윤동건","이서준","이서현","이승권","임지인","정석우","정승이",
+  "정찬호","고창근","임창환","채승헌","김채연","이형민","최진규",
+];
+const SEAT_COUNT  = 31;
+const FRONT_COUNT = 12;
+
+// ─────────────────────────────────────────────
+//  유틸
+// ─────────────────────────────────────────────
+const getMonthKey = (d = new Date()) =>
+  `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+const getTodayKey = (d = new Date()) => d.toISOString().split("T")[0];
+const shuffle     = (arr) => [...arr].sort(() => Math.random() - 0.5);
+const formatTime  = (sec) => {
+  const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
+  if (h > 0) return `${h}시간 ${m}분 ${s}초`;
+  if (m > 0) return `${m}분 ${s}초`;
+  return `${s}초`;
+};
+const formatHHMM  = (date) => {
+  const h = String(date.getHours()).padStart(2,"0");
+  const m = String(date.getMinutes()).padStart(2,"0");
+  return `${h}:${m}`;
+};
+// 오늘 날짜 파일명 형식 (아침자습출석 - 년/월/일)
+const getTodayFilename = (d = new Date()) => {
+  const y = d.getFullYear();
+  const mo = String(d.getMonth()+1).padStart(2,"0");
+  const day = String(d.getDate()).padStart(2,"0");
+  return `아침자습출석 - ${y}/${mo}/${day}`;
+};
+
+// 월의 모든 날짜 반환 (YYYY-MM-DD 배열)
+const getDaysInMonth = (monthKey) => {
+  const [y, m] = monthKey.split("-").map(Number);
+  const days = [];
+  const last = new Date(y, m, 0).getDate();
+  for (let d = 1; d <= last; d++) {
+    days.push(`${monthKey}-${String(d).padStart(2,"0")}`);
+  }
+  return days;
+};
+
+// 오늘 이미 출석한 학생인지 확인
+const hasAttendedToday = (data, student) => {
+  const today = getTodayKey();
+  const month = getMonthKey();
+  const monthData = data.attendance?.[month]?.[student];
+  if (!monthData || !monthData.history) return false;
+  return monthData.history.includes(today);
+};
+
+// ─────────────────────────────────────────────
+//  스토리지
+// ─────────────────────────────────────────────
+const STORAGE_KEY = "class_mgr_v1";
+const SESSION_KEY = "class_mgr_sessions_v1";
+
+const loadData = () => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (!parsed.auto_end_time) parsed.auto_end_time = "08:40";
+      if (!parsed.students) parsed.students = DEFAULT_STUDENTS;
+      if (!parsed.attendance_times) parsed.attendance_times = {};
+      return parsed;
+    }
+  } catch(_) {}
+  return {
+    students: DEFAULT_STUDENTS,
+    front_students: [],
+    attendance: {},
+    attendance_times: {},
+    last_auto_end: "",
+    auto_end_time: "08:40",
+  };
+};
+
+const saveData = (data) => {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch(_) {}
+};
+
+const loadSessions = () => {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch(_) {}
+  return { activeSessions:{}, checkInTimes:{} };
+};
+
+const saveSessions = (sessions, ciTimes) => {
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify({activeSessions:sessions, checkInTimes:ciTimes})); } catch(_) {}
+};
+
+// ─────────────────────────────────────────────
+//  출석 기록 헬퍼
+// ─────────────────────────────────────────────
+function addRecord(data, student, dur, month, today, checkInTimeStr) {
+  const d = JSON.parse(JSON.stringify(data));
+  if (!d.attendance[month]) d.attendance[month] = {};
+  const A = d.attendance[month];
+  if (!A[student]) A[student] = { count:0, time:0, history:[] };
+  if (!A[student].history) A[student].history = [];
+  if (!A[student].history.includes(today)) {
+    A[student].count++;
+    A[student].history.push(today);
+    // 출석 시간 기록
+    if (!d.attendance_times) d.attendance_times = {};
+    if (!d.attendance_times[month]) d.attendance_times[month] = {};
+    if (!d.attendance_times[month][student]) d.attendance_times[month][student] = {};
+    if (checkInTimeStr) {
+      d.attendance_times[month][student][today] = checkInTimeStr;
+    }
+  }
+  A[student].time += dur;
+  return d;
+}
+
+// ─────────────────────────────────────────────
+//  디자인 토큰
+// ─────────────────────────────────────────────
+const T = {
+  bg:"#F0F4F8", surface:"#FFFFFF",
+  primary:"#3B6FE8", green:"#22C55E", greenDk:"#16A34A",
+  purple:"#7C3AED", amber:"#F59E0B", slate:"#64748B",
+  text:"#1E293B", muted:"#94A3B8", border:"#E2E8F0",
+  frontBg:"#DBEAFE", frontBd:"#60A5FA",
+  font:"'Noto Sans KR', 'Malgun Gothic', sans-serif",
+};
+const btn = (bg="#3B6FE8", opts={}) => ({
+  background:bg, color:"#fff", border:"none", borderRadius:9,
+  padding:"0.55rem 1.2rem", fontFamily:T.font, fontWeight:700,
+  fontSize:"0.88rem", lineHeight:1.4, ...opts,
+});
+
+// ─────────────────────────────────────────────
+//  루트 앱
+// ─────────────────────────────────────────────
+function App() {
+  const [view,           setView]          = useState("home");
+  const [data,           setData]          = useState(() => loadData());
+  const [arrangement,    setArrangement]   = useState(Array(SEAT_COUNT).fill(""));
+  const [frontSeated,    setFrontSeated]   = useState([]);
+  const [activeSessions, setActiveSessions]= useState(() => loadSessions().activeSessions);
+  const [checkInTimes,   setCheckInTimes]  = useState(() => loadSessions().checkInTimes);  // student -> Date.now() check-in timestamp
+  const [currentTime,    setCurrentTime]   = useState(new Date());
+  const [modal,          setModal]         = useState(null);
+  const [toast,          setToast]         = useState("");
+  const autoEndRef = useRef("");
+  const dataRef    = useRef(data);
+
+  // students 파생 (data에서 읽음)
+  const students = data.students || DEFAULT_STUDENTS;
+
+  useEffect(() => { dataRef.current = data; saveData(data); }, [data]);
+  useEffect(() => { saveSessions(activeSessions, checkInTimes); }, [activeSessions, checkInTimes]);
+
+  // ── 나가기 전 자동 파일 저장 ──
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      const d = dataRef.current;
+      try {
+        const filename = getTodayFilename();
+        const payload = JSON.stringify(d, null, 2);
+        const blob = new Blob([payload], { type: "application/json" });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement("a");
+        a.href = url;
+        a.download = `${filename}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch(_) {}
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(""), 3500);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  // 시계
+  useEffect(() => {
+    const t = setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // 자동 종료 (설정된 시간에 맞게)
+  useEffect(() => {
+    const now = currentTime;
+    const today = getTodayKey(now);
+    const autoEndTime = dataRef.current.auto_end_time || "08:40";
+    const [endH, endM] = autoEndTime.split(":").map(Number);
+
+    if (
+      now.getHours() === endH &&
+      now.getMinutes() >= endM &&
+      dataRef.current.last_auto_end !== today &&
+      autoEndRef.current !== today
+    ) {
+      autoEndRef.current = today;
+      let d = { ...dataRef.current };
+      const sessions = activeSessions;
+      const ciTimes  = checkInTimes;
+      const count = Object.keys(sessions).length;
+      Object.entries(sessions).forEach(([s, st]) => {
+        const ciDate = ciTimes[s] ? new Date(ciTimes[s]) : new Date(st);
+        d = addRecord(d, s, Math.floor((Date.now()-st)/1000), getMonthKey(now), today, formatHHMM(ciDate));
+      });
+      d.last_auto_end = today;
+      setData(d);
+      setActiveSessions({});
+      setCheckInTimes({});
+      if (count > 0) setToast(`⏰ ${autoEndTime} — ${count}명 자습 자동 종료 & 기록 완료`);
+    }
+  }, [currentTime]);
+
+  // 자리 섞기
+  const shuffleSeats = useCallback(() => {
+    const sts = dataRef.current.students || DEFAULT_STUDENTS;
+    const front   = shuffle(dataRef.current.front_students.filter(s => sts.includes(s)));
+    const normal  = shuffle(sts.filter(s => !front.includes(s)));
+    const frontIdx= shuffle(Array.from({length:FRONT_COUNT},(_,i)=>i));
+    const arr     = Array(SEAT_COUNT).fill("");
+    const placed  = [], overflow = [];
+    for (const s of front) {
+      if (frontIdx.length) { arr[frontIdx.pop()] = s; placed.push(s); }
+      else overflow.push(s);
+    }
+    const emptyIdx = shuffle(arr.map((v,i)=>v===""?i:-1).filter(i=>i>=0));
+    for (const s of [...normal,...overflow]) { if (emptyIdx.length) arr[emptyIdx.pop()] = s; }
+    setArrangement(arr);
+    setFrontSeated(placed);
+  }, []);
+
+  // 자습 토글 (하루 1회 제한)
+  const toggleAttendance = useCallback((student) => {
+    if (activeSessions[student] != null) {
+      // 종료
+      const st  = activeSessions[student];
+      const dur = Math.floor((Date.now() - st) / 1000);
+      const now = new Date();
+      const ciDate = checkInTimes[student] ? new Date(checkInTimes[student]) : new Date(st);
+      const d = addRecord(dataRef.current, student, dur, getMonthKey(now), getTodayKey(now), formatHHMM(ciDate));
+      setData(d);
+      setActiveSessions(prev => { const n={...prev}; delete n[student]; return n; });
+      setCheckInTimes(prev => { const n={...prev}; delete n[student]; return n; });
+      setToast(`✅ ${student} 자습 완료 · ${formatTime(dur)}`);
+    } else {
+      // 이미 오늘 출석한 경우 차단
+      if (hasAttendedToday(dataRef.current, student)) {
+        setToast(`⚠ ${student}은(는) 오늘 이미 자습 기록이 있습니다`);
+        return;
+      }
+      const now = Date.now();
+      setActiveSessions(prev => ({...prev, [student]: now}));
+      setCheckInTimes(prev  => ({...prev, [student]: now}));
+    }
+  }, [activeSessions, checkInTimes]);
+
+  const saveFront = useCallback((front) => {
+    const d = {...dataRef.current, front_students: front};
+    setData(d);
+  }, []);
+
+  const saveStudents = useCallback((newStudents) => {
+    const d = {...dataRef.current, students: newStudents};
+    setData(d);
+    setToast(`✅ 학생 명단이 저장되었습니다 (${newStudents.length}명)`);
+  }, []);
+
+  const saveAutoEndTime = useCallback((time) => {
+    const d = {...dataRef.current, auto_end_time: time};
+    setData(d);
+    setToast(`⏱ 자습 종료 시간이 ${time}으로 설정되었습니다`);
+  }, []);
+
+  // 수동 파일 저장 (오늘 날짜 파일명)
+  const saveToFile = useCallback(() => {
+    try {
+      const filename = getTodayFilename();
+      const payload = JSON.stringify(dataRef.current, null, 2);
+      const blob = new Blob([payload], { type: "application/json" });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href = url;
+      a.download = `${filename}.json`;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a); URL.revokeObjectURL(url);
+      setToast(`💾 ${filename}.json 저장 완료`);
+    } catch(_) {
+      setToast("❌ 파일 저장에 실패했습니다");
+    }
+  }, []);
+
+  const resetMonth = useCallback((monthKey) => {
+    const d = JSON.parse(JSON.stringify(dataRef.current));
+    if (d.attendance[monthKey]) delete d.attendance[monthKey];
+    setData(d);
+    setToast("🗑 해당 월 기록이 초기화되었습니다");
+  }, []);
+
+  const exportAttendance = useCallback(() => {
+    const json = JSON.stringify(dataRef.current.attendance, null, 2);
+    const blob = new Blob([json], {type:"application/json"});
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href = url;
+    a.download = `자습기록_${getMonthKey()}.json`;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a); URL.revokeObjectURL(url);
+    setToast("💾 파일로 저장되었습니다");
+  }, []);
+
+  // 파일 불러오기 (localStorage에 병합 저장)
+  const importAttendance = useCallback((e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const imported = JSON.parse(ev.target.result);
+        const d = JSON.parse(JSON.stringify(dataRef.current));
+        Object.entries(imported).forEach(([month, students]) => {
+          if (!d.attendance[month]) d.attendance[month] = {};
+          Object.entries(students).forEach(([name, info]) => {
+            if (!d.attendance[month][name]) {
+              d.attendance[month][name] = info;
+            } else {
+              const existing = d.attendance[month][name];
+              const newHistory = [...new Set([...(existing.history||[]), ...(info.history||[])])];
+              existing.count   = newHistory.length;
+              existing.history = newHistory;
+              existing.time    = (existing.time||0) + (info.time||0);
+            }
+          });
+        });
+        setData(d);
+        setToast("✅ 데이터 불러오기 완료! 자동으로 저장되었습니다");
+      } catch(_) {
+        setToast("❌ 파일 형식이 올바르지 않습니다");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  }, []);
+
+  return (
+    <div>
+      {/* 토스트 알림 */}
+      {toast && (
+        <div style={{
+          position:"fixed", bottom:"1.5rem", left:"50%", transform:"translateX(-50%)",
+          background:"#1E293B", color:"#fff", borderRadius:12,
+          padding:"0.75rem 1.4rem", fontSize:"0.9rem", fontWeight:600,
+          fontFamily:T.font, zIndex:9999, boxShadow:"0 8px 24px rgba(0,0,0,0.3)",
+          whiteSpace:"nowrap", maxWidth:"90vw", overflow:"hidden", textOverflow:"ellipsis",
+          animation:"fadeInUp 0.25s ease",
+        }}>{toast}</div>
+      )}
+      {view==="home"       && <HomeView setView={setView} onSaveFile={saveToFile} />}
+      {view==="seating"    && (
+        <SeatingView
+          arrangement={arrangement} frontSeated={frontSeated}
+          onBack={()=>setView("home")} onShuffle={shuffleSeats}
+        />
+      )}
+      {view==="attendance" && (
+        <AttendanceView
+          activeSessions={activeSessions} checkInTimes={checkInTimes}
+          onToggle={toggleAttendance}
+          currentTime={currentTime} data={data}
+          students={students}
+          onBack={()=>{
+            if (Object.keys(activeSessions).length > 0) {
+              if (!window.confirm("진행 중인 자습이 있습니다. 나가시겠습니까?\n(현재 시간은 기록되지 않습니다)")) return;
+            }
+            setView("home");
+          }}
+          onRankings={()=>setModal("rankings")}
+        />
+      )}
+      {view==="attTable"   && (
+        <AttendanceTableView
+          attendance={data.attendance}
+          attendanceTimes={data.attendance_times || {}}
+          students={students}
+          onBack={()=>setView("home")}
+        />
+      )}
+      {view==="settings"   && (
+        <SettingsView
+          data={data}
+          students={students}
+          onSaveFront={(f)=>{ saveFront(f); setToast("✅ 앞자리 설정이 저장되었습니다"); }}
+          onSaveEndTime={saveAutoEndTime}
+          onSaveStudents={saveStudents}
+          onSaveFile={saveToFile}
+          onBack={()=>setView("home")}
+        />
+      )}
+      {modal==="rankings" && (
+        <RankingsModal
+          attendance={data.attendance}
+          onClose={()=>setModal(null)}
+          onReset={resetMonth}
+          onExport={exportAttendance}
+          onImport={importAttendance}
+        />
+      )}
+      <style>{`
+        @keyframes fadeInUp {
+          from { opacity:0; transform:translateX(-50%) translateY(10px); }
+          to   { opacity:1; transform:translateX(-50%) translateY(0); }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+//  홈
+// ─────────────────────────────────────────────
+function HomeView({ setView, onSaveFile }) {
+  return (
+    <div style={{
+      minHeight:"100vh",
+      background:"linear-gradient(145deg,#0f1b3d 0%,#1a3a7a 50%,#2563EB 100%)",
+      display:"flex", flexDirection:"column",
+      alignItems:"center", justifyContent:"center",
+      fontFamily:T.font, padding:"2rem",
+    }}>
+      <div style={{textAlign:"center", marginBottom:"3rem"}}>
+        <div style={{fontSize:"3.5rem", marginBottom:"1rem"}}>🏫</div>
+        <h1 style={{color:"#fff", fontSize:"clamp(1.6rem,4vw,2.6rem)",
+          fontWeight:900, letterSpacing:"-0.03em", margin:"0 0 0.5rem"}}>
+          학급 관리 프로그램
+        </h1>
+        <p style={{color:"rgba(255,255,255,0.5)", fontSize:"0.9rem"}}>
+          자리 배치 및 아침 자습 출석 관리
+        </p>
+      </div>
+      <div style={{display:"flex", gap:"1.5rem", flexWrap:"wrap", justifyContent:"center"}}>
+        {[
+          {icon:"🪑", label:"자리 배치",     sub:"랜덤 배치 & 앞자리 설정",  view:"seating",    accent:"#22C55E"},
+          {icon:"📝", label:"아침 자습 출석", sub:"출석 체크 & 시간 기록",    view:"attendance", accent:"#F59E0B"},
+          {icon:"📊", label:"출석 현황표",   sub:"월별 출석 달력 보기",       view:"attTable",   accent:"#60A5FA"},
+          {icon:"⚙️", label:"설정",          sub:"종료시간·명단·저장 관리",   view:"settings",   accent:"#A78BFA"},
+        ].map(({icon,label,sub,view,accent})=>(
+          <button key={view} onClick={()=>setView(view)} style={{
+            background:"rgba(255,255,255,0.07)",
+            border:"1.5px solid rgba(255,255,255,0.18)",
+            borderRadius:20, padding:"2.2rem 3rem",
+            color:"#fff", fontFamily:T.font, textAlign:"center", minWidth:190,
+            boxShadow:"0 8px 32px rgba(0,0,0,0.25)",
+          }}>
+            <div style={{
+              fontSize:"2.8rem", marginBottom:"0.8rem",
+              background:`${accent}22`, borderRadius:"50%",
+              width:68, height:68, display:"flex", alignItems:"center",
+              justifyContent:"center", margin:"0 auto 0.9rem",
+              border:`2px solid ${accent}44`,
+            }}>{icon}</div>
+            <div style={{fontSize:"1.2rem", fontWeight:800, marginBottom:"0.3rem"}}>{label}</div>
+            <div style={{fontSize:"0.78rem", color:"rgba(255,255,255,0.45)"}}>{sub}</div>
+          </button>
+        ))}
+      </div>
+      {/* 수동 저장 버튼 */}
+      <button onClick={onSaveFile} style={{
+        marginTop:"2rem",
+        background:"rgba(255,255,255,0.1)",
+        border:"1.5px solid rgba(255,255,255,0.25)",
+        borderRadius:12, padding:"0.7rem 2rem",
+        color:"rgba(255,255,255,0.8)", fontFamily:T.font,
+        fontSize:"0.88rem", fontWeight:700,
+      }}>
+        💾 지금 저장하기
+      </button>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+//  자리 배치
+// ─────────────────────────────────────────────
+function SeatCell({ student, isFront }) {
+  const has = Boolean(student);
+  return (
+    <div className="seat-cell" style={{
+      width:84, height:56, borderRadius:10,
+      display:"flex", flexDirection:"column",
+      alignItems:"center", justifyContent:"center",
+      background: has ? (isFront ? T.frontBg : "#F8FAFC") : "#F1F5F9",
+      border: has
+        ? (isFront ? `2px solid ${T.frontBd}` : `2px solid ${T.border}`)
+        : "2px dashed #DDE3EC",
+      fontWeight: has ? 700 : 400,
+      fontSize:"0.82rem", color: has ? T.text : "#D1D8E0",
+      fontFamily:T.font,
+    }}>
+      {student || ""}
+      {isFront && has && (
+        <span style={{fontSize:"0.58rem",color:T.frontBd,fontWeight:600,lineHeight:1,marginTop:2}}>
+          ▲앞자리
+        </span>
+      )}
+    </div>
+  );
+}
+
+function SeatingView({ arrangement, frontSeated, onBack, onShuffle }) {
+  const isEmpty = arrangement.every(s=>!s);
+  const rows    = Array.from({length:5},(_,r)=>arrangement.slice(r*6,r*6+6));
+
+  // ── Canvas로 자리 배치도 PNG 내보내기 ──
+  const exportImage = useCallback(() => {
+    const CELL_W = 110, CELL_H = 70, GAP = 8, PAD = 28;
+    const COLS = 6;
+    // 행: 5행 + 마지막 1칸 행
+    const TOTAL_ROWS = 6;
+    const DESK_H = 48;
+    const HEADER_H = 56; // 제목 영역
+    const LEGEND_H = 36; // 범례 영역
+    const W = PAD*2 + COLS*(CELL_W+GAP) - GAP;
+    const H = PAD*2 + HEADER_H + DESK_H + GAP + TOTAL_ROWS*(CELL_H+GAP) - GAP + LEGEND_H + 16;
+
+    const canvas = document.createElement("canvas");
+    const DPR = 2; // 고해상도
+    canvas.width  = W * DPR;
+    canvas.height = H * DPR;
+    canvas.style.width  = W + "px";
+    canvas.style.height = H + "px";
+    const ctx = canvas.getContext("2d");
+    ctx.scale(DPR, DPR);
+
+    // 배경
+    ctx.fillStyle = "#F0F4F8";
+    ctx.fillRect(0, 0, W, H);
+
+    // 제목 배경
+    const grad = ctx.createLinearGradient(0,0,W,0);
+    grad.addColorStop(0,"#0f1b3d");
+    grad.addColorStop(1,"#2563EB");
+    ctx.fillStyle = grad;
+    roundRect(ctx, 0, 0, W, HEADER_H, 0);
+    ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 20px 'Malgun Gothic', sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("자리 배치도", W/2, HEADER_H/2);
+
+    // 날짜
+    const today = new Date().toLocaleDateString("ko-KR",{year:"numeric",month:"2-digit",day:"2-digit"});
+    ctx.font = "13px 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "rgba(255,255,255,0.6)";
+    ctx.fillText(today, W/2, HEADER_H/2 + 18);
+
+    // 교탁
+    const deskY = PAD + HEADER_H;
+    ctx.fillStyle = "#FEF3C7";
+    ctx.strokeStyle = "#F59E0B";
+    ctx.lineWidth = 2;
+    roundRect(ctx, PAD, deskY, W - PAD*2, DESK_H, 10);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = "#92400E";
+    ctx.font = "bold 15px 'Malgun Gothic', sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("📋  교  탁", W/2, deskY + DESK_H/2);
+
+    // 자리 셀 그리기
+    const cellTop = PAD + HEADER_H + DESK_H + GAP;
+
+    const drawCell = (col, row, student, isFront) => {
+      const x = PAD + col*(CELL_W+GAP);
+      const y = cellTop + row*(CELL_H+GAP);
+      const has = Boolean(student);
+
+      if (has) {
+        // 그림자
+        ctx.fillStyle = "rgba(0,0,0,0.07)";
+        roundRect(ctx, x+2, y+2, CELL_W, CELL_H, 10);
+        ctx.fill();
+        // 셀 배경
+        ctx.fillStyle = isFront ? "#DBEAFE" : "#F8FAFC";
+        ctx.strokeStyle = isFront ? "#60A5FA" : "#E2E8F0";
+        ctx.lineWidth = isFront ? 2 : 1.5;
+      } else {
+        ctx.fillStyle = "#F1F5F9";
+        ctx.strokeStyle = "#DDE3EC";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5,4]);
+      }
+      roundRect(ctx, x, y, CELL_W, CELL_H, 10);
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      if (has) {
+        ctx.fillStyle = isFront ? "#1E40AF" : "#1E293B";
+        ctx.font = `bold 14px 'Malgun Gothic', sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = isFront ? "middle" : "middle";
+        ctx.fillText(student, x + CELL_W/2, y + CELL_H/2 - (isFront ? 8 : 0));
+        if (isFront) {
+          ctx.fillStyle = "#60A5FA";
+          ctx.font = `600 10px 'Malgun Gothic', sans-serif`;
+          ctx.fillText("▲ 앞자리", x + CELL_W/2, y + CELL_H/2 + 10);
+        }
+      }
+    };
+
+    // 5행 × 6열
+    rows.forEach((row, ri) => {
+      row.forEach((student, ci) => {
+        drawCell(ci, ri, student, frontSeated.includes(student));
+      });
+    });
+    // 마지막 1칸 (6번째 열, 6번째 행)
+    const last = arrangement[30];
+    drawCell(5, 5, last, frontSeated.includes(last));
+
+    // 범례
+    const lgY = cellTop + TOTAL_ROWS*(CELL_H+GAP) + 4;
+    const legends = [
+      {bg:"#DBEAFE", bd:"#60A5FA", label:"앞자리 지정"},
+      {bg:"#F8FAFC", bd:"#E2E8F0", label:"일반 배정"},
+    ];
+    let lgX = PAD;
+    legends.forEach(({bg,bd,label}) => {
+      ctx.fillStyle = bg;
+      ctx.strokeStyle = bd;
+      ctx.lineWidth = 1.5;
+      roundRect(ctx, lgX, lgY+8, 16, 16, 4);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "#64748B";
+      ctx.font = "12px 'Malgun Gothic', sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, lgX + 22, lgY + 16);
+      lgX += 22 + ctx.measureText(label).width + 24;
+    });
+
+    // 다운로드
+    const link = document.createElement("a");
+    link.download = `자리배치도_${today.replace(/\. /g,"-").replace(".","")}`.replace(/\s/g,"") + ".png";
+    link.href = canvas.toDataURL("image/png");
+    link.click();
+  }, [arrangement, frontSeated, rows]);
+
+  return (
+    <div style={{minHeight:"100vh", background:T.bg, fontFamily:T.font}}>
+      <div style={{
+        background:T.surface, borderBottom:`1px solid ${T.border}`,
+        padding:"0.85rem 1.2rem", display:"flex", alignItems:"center", gap:"0.7rem",
+        boxShadow:"0 1px 6px rgba(0,0,0,0.06)", flexWrap:"wrap",
+      }}>
+        <button onClick={onBack}    style={btn(T.slate)}>← 뒤로</button>
+        <h2 style={{flex:1, textAlign:"center", fontSize:"1.1rem", fontWeight:800, color:T.text}}>
+          자리 배치도
+        </h2>
+        {!isEmpty && (
+          <button onClick={exportImage} style={btn("#0EA5E9",{marginRight:"0.4rem"})}>🖼 이미지 저장</button>
+        )}
+        <button onClick={onShuffle} style={btn(T.green)}>🔀 자리 배치하기</button>
+      </div>
+      <div style={{display:"flex", flexDirection:"column", alignItems:"center", padding:"1.5rem 0.5rem"}}>
+        <div style={{display:"flex",gap:"1.5rem",marginBottom:"1rem",flexWrap:"wrap",justifyContent:"center"}}>
+          {[
+            {bg:T.frontBg,bd:T.frontBd,label:"앞자리 지정"},
+            {bg:"#F8FAFC",bd:T.border,  label:"일반 배정"},
+          ].map(({bg,bd,label})=>(
+            <span key={label} style={{display:"flex",alignItems:"center",gap:"0.4rem",
+              fontSize:"0.8rem",color:T.slate,fontFamily:T.font}}>
+              <span style={{width:16,height:16,background:bg,
+                border:`2px solid ${bd}`,borderRadius:4,display:"inline-block"}}/>
+              {label}
+            </span>
+          ))}
+        </div>
+        <div style={{
+          background:"#FEF3C7", border:"2px solid #F59E0B", borderRadius:12,
+          padding:"0.6rem 0", width:"min(560px,95vw)",
+          textAlign:"center", fontWeight:800, fontSize:"0.95rem", color:"#92400E",
+          marginBottom:"1rem", letterSpacing:"0.12em", fontFamily:T.font,
+        }}>📋 교 탁</div>
+        {isEmpty ? (
+          <div style={{textAlign:"center",color:T.muted,marginTop:"3rem",fontFamily:T.font}}>
+            <div style={{fontSize:"3rem",marginBottom:"0.8rem"}}>🪑</div>
+            <p style={{fontSize:"0.95rem",fontWeight:500}}>"자리 배치하기" 버튼을 눌러주세요</p>
+          </div>
+        ) : (
+          <div style={{overflowX:"auto"}}>
+            {rows.map((row,ri)=>(
+              <div key={ri} style={{display:"flex",gap:6,marginBottom:6}}>
+                {row.map((s,ci)=>(
+                  <SeatCell key={ci} student={s} isFront={frontSeated.includes(s)} />
+                ))}
+              </div>
+            ))}
+            <div style={{display:"flex",gap:6}}>
+              {Array.from({length:5}).map((_,i)=>(
+                <div key={i} style={{width:84,height:56}}/>
+              ))}
+              <SeatCell student={arrangement[30]} isFront={frontSeated.includes(arrangement[30])} />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Canvas 모서리 둥근 사각형 헬퍼
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.lineTo(x+w-r, y);
+  ctx.quadraticCurveTo(x+w, y, x+w, y+r);
+  ctx.lineTo(x+w, y+h-r);
+  ctx.quadraticCurveTo(x+w, y+h, x+w-r, y+h);
+  ctx.lineTo(x+r, y+h);
+  ctx.quadraticCurveTo(x, y+h, x, y+h-r);
+  ctx.lineTo(x, y+r);
+  ctx.quadraticCurveTo(x, y, x+r, y);
+  ctx.closePath();
+}
+
+// ─────────────────────────────────────────────
+//  아침 자습 출석 뷰
+// ─────────────────────────────────────────────
+function AttendanceView({ activeSessions, checkInTimes, onToggle, currentTime, data, students, onBack, onRankings }) {
+  const timeStr = currentTime.toLocaleString("ko-KR",{
+    year:"numeric",month:"2-digit",day:"2-digit",
+    hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false,
+  });
+  const activeCount = Object.keys(activeSessions).length;
+  const autoEndTime = data.auto_end_time || "08:40";
+  const stuList = students || DEFAULT_STUDENTS;
+
+  // 오늘 출석한 학생의 체크인 시간 가져오기
+  const getCheckinLabel = (student) => {
+    const month = getMonthKey();
+    const today = getTodayKey();
+    return data.attendance_times?.[month]?.[student]?.[today] || null;
+  };
+
+  return (
+    <div style={{minHeight:"100vh", background:T.bg, fontFamily:T.font}}>
+      <div style={{
+        background:T.surface, borderBottom:`1px solid ${T.border}`,
+        padding:"0.85rem 1.2rem", display:"flex", alignItems:"center",
+        gap:"0.8rem", flexWrap:"wrap", boxShadow:"0 1px 6px rgba(0,0,0,0.06)",
+      }}>
+        <button onClick={onBack} style={btn(T.slate)}>← 뒤로</button>
+        <div style={{flex:1, textAlign:"center"}}>
+          <div style={{fontSize:"0.72rem",fontWeight:600,color:T.muted,letterSpacing:"0.06em"}}>현재 시간</div>
+          <div style={{fontSize:"clamp(0.95rem,2.5vw,1.35rem)",fontWeight:900,
+            color:"#DC2626",fontVariantNumeric:"tabular-nums"}}>{timeStr}</div>
+        </div>
+        {/* 종료 시간 배지 */}
+        <div style={{
+          background:"#FFF7ED", border:"1.5px solid #FDBA74",
+          borderRadius:10, padding:"0.3rem 1.2rem", textAlign:"center",
+          minWidth:90,
+        }}>
+          <div style={{fontSize:"0.66rem",color:"#9A3412",fontWeight:700,whiteSpace:"nowrap"}}>자동 종료</div>
+          <div style={{fontSize:"1.05rem",fontWeight:900,color:"#EA580C",whiteSpace:"nowrap"}}>{autoEndTime}</div>
+        </div>
+        <div style={{
+          background:activeCount>0?"#F0FDF4":"#F8FAFC",
+          border:`1.5px solid ${activeCount>0?T.greenDk:T.border}`,
+          borderRadius:10, padding:"0.35rem 1rem", textAlign:"center",
+        }}>
+          <div style={{fontSize:"0.7rem",color:T.muted,fontWeight:600}}>자습 중</div>
+          <div style={{fontSize:"1.4rem",fontWeight:900,
+            color:activeCount>0?T.green:T.muted,lineHeight:1.2}}>
+            {activeCount}<span style={{fontSize:"0.78rem",fontWeight:600}}>명</span>
+          </div>
+        </div>
+        <button onClick={onRankings} style={btn(T.purple)}>🏆 월별 순위</button>
+      </div>
+
+      {/* 학생 버튼 그리드 */}
+      <div style={{
+        padding:"1.2rem", display:"grid",
+        gridTemplateColumns:"repeat(auto-fill,minmax(105px,1fr))",
+        gap:"0.65rem", maxWidth:820, margin:"0 auto",
+      }}>
+        {stuList.map(student => {
+          const active    = activeSessions[student] != null;
+          const doneToday = !active && hasAttendedToday(data, student);
+          const ciLabel   = active
+            ? formatHHMM(new Date(checkInTimes[student] || activeSessions[student]))
+            : doneToday ? getCheckinLabel(student)
+            : null;
+          return (
+            <button key={student} onClick={()=>onToggle(student)} className="stu-btn" style={{
+              background: active ? T.green : doneToday ? "#DCFCE7" : "#F8FAFC",
+              color:       active ? "#fff"  : doneToday ? T.greenDk : T.text,
+              border:`2px solid ${active ? T.greenDk : doneToday ? "#86EFAC" : T.border}`,
+              borderRadius:12, padding:"0.85rem 0.3rem",
+              fontFamily:T.font, fontSize:"0.88rem", fontWeight:700,
+              boxShadow:active?"0 4px 14px rgba(34,197,94,0.35)":doneToday?"0 2px 8px rgba(34,197,94,0.15)":"none",
+              display:"flex", flexDirection:"column", alignItems:"center", gap:"0.2rem",
+              opacity: doneToday ? 0.85 : 1,
+            }}>
+              {student}
+              {active && (
+                <span style={{fontSize:"0.66rem",fontWeight:500,
+                  background:"rgba(255,255,255,0.25)",borderRadius:4,padding:"0.1rem 0.35rem"}}>
+                  자습 중 ✓
+                </span>
+              )}
+              {ciLabel && (
+                <span style={{
+                  fontSize:"0.62rem",fontWeight:700,
+                  background: active ? "rgba(255,255,255,0.3)" : "rgba(34,197,94,0.15)",
+                  borderRadius:4,padding:"0.1rem 0.35rem",
+                  color: active ? "#fff" : T.greenDk,
+                }}>
+                  {active ? `${ciLabel} 입실` : `${ciLabel} 완료`}
+                </span>
+              )}
+              {doneToday && !ciLabel && (
+                <span style={{fontSize:"0.62rem",fontWeight:600,
+                  background:"rgba(34,197,94,0.15)",borderRadius:4,padding:"0.1rem 0.35rem",color:T.greenDk}}>
+                  오늘 완료 ✓
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {activeCount > 0 && (
+        <p style={{textAlign:"center",color:T.muted,fontSize:"0.8rem",paddingBottom:"1.5rem"}}>
+          버튼을 다시 누르면 종료되고 기록됩니다
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+//  출석 현황표 뷰 (월별 테이블)
+// ─────────────────────────────────────────────
+function AttendanceTableView({ attendance, attendanceTimes, students, onBack }) {
+  const stuList = students || DEFAULT_STUDENTS;
+  const allMonths = Object.keys(attendance).sort().reverse();
+  const today = getTodayKey();
+
+  const months = allMonths.length > 0 ? allMonths : [getMonthKey()];
+  const [selectedMonth, setSelectedMonth] = useState(months[0] || getMonthKey());
+
+  const days = getDaysInMonth(selectedMonth);
+  const monthData = attendance[selectedMonth] || {};
+  const monthTimes = (attendanceTimes || {})[selectedMonth] || {};
+
+  const dayLabels = days.map(d => {
+    const dt = new Date(d + "T00:00:00");
+    const dayNum = dt.getDate();
+    const dayOfWeek = ["일","월","화","수","목","금","토"][dt.getDay()];
+    return { key: d, label: dayNum, sub: dayOfWeek, weekend: dt.getDay()===0||dt.getDay()===6 };
+  });
+
+  const studentHistory = {};
+  stuList.forEach(s => {
+    const hist = monthData[s]?.history || [];
+    studentHistory[s] = new Set(hist);
+  });
+
+  const getCell = (student, dayKey) => {
+    if (dayKey > today) return "future";
+    return studentHistory[student].has(dayKey) ? "yes" : "no";
+  };
+
+  const getCheckInTime = (student, dayKey) => {
+    return monthTimes?.[student]?.[dayKey] || null;
+  };
+
+  const countForStudent = (s) => studentHistory[s].size;
+  const totalDaysPassed = days.filter(d => d <= today).length;
+
+  const exportExcel = () => {
+    const aoa = [];
+    aoa.push(["이름", ...dayLabels.map(d=>`${d.label}(${d.sub})`), "합계(일)", "출석률(%)"]);
+    stuList.forEach(student => {
+      const row = [student];
+      dayLabels.forEach(({key}) => {
+        const status = getCell(student, key);
+        if (status==="yes") { const t=getCheckInTime(student,key); row.push(t || "○"); }
+        else if (status==="no") { row.push("✗"); }
+        else row.push("");
+      });
+      const count = countForStudent(student);
+      const rate  = totalDaysPassed > 0 ? Math.round(count/totalDaysPassed*100) : 0;
+      row.push(count);
+      row.push(rate);
+      aoa.push(row);
+    });
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws["!cols"] = [{wch:8}, ...dayLabels.map(()=>({wch:7})), {wch:8}, {wch:9}];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, `${selectedMonth} 출석`);
+    const wbout = XLSX.write(wb, {bookType:"xlsx", type:"array"});
+    const blob = new Blob([wbout], {type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href = url; a.download = `출석현황표_${selectedMonth}.xlsx`;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a); URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div style={{minHeight:"100vh", background:T.bg, fontFamily:T.font}}>
+      <div className="no-print" style={{
+        background:T.surface, borderBottom:`1px solid ${T.border}`,
+        padding:"0.85rem 1.2rem", display:"flex", alignItems:"center", gap:"0.7rem",
+        boxShadow:"0 1px 6px rgba(0,0,0,0.06)", flexWrap:"wrap",
+      }}>
+        <button onClick={onBack} style={btn(T.slate)}>← 뒤로</button>
+        <h2 style={{flex:1, textAlign:"center", fontSize:"1.1rem", fontWeight:800, color:T.text}}>
+          📊 출석 현황표
+        </h2>
+        <button onClick={exportExcel} style={btn("#16A34A",{fontSize:"0.82rem"})}>📊 엑셀 내보내기</button>
+      </div>
+
+      <div className="no-print" style={{
+        background:T.surface, borderBottom:`1px solid ${T.border}`,
+        padding:"0.6rem 1rem", display:"flex", gap:"0.5rem",
+        overflowX:"auto",
+      }}>
+        {months.map(mk => (
+          <button key={mk} onClick={()=>setSelectedMonth(mk)} style={{
+            background: selectedMonth===mk ? T.primary : "#F1F5F9",
+            color: selectedMonth===mk ? "#fff" : T.text,
+            border:"none", borderRadius:8, padding:"0.4rem 1rem",
+            fontFamily:T.font, fontWeight:700, fontSize:"0.85rem",
+            whiteSpace:"nowrap",
+          }}>
+            {mk.replace("-","년 ")}월
+          </button>
+        ))}
+        {months.length === 0 && (
+          <span style={{color:T.muted,fontSize:"0.85rem",padding:"0.4rem 0"}}>기록 없음</span>
+        )}
+      </div>
+
+      <div style={{padding:"1rem", overflowX:"auto"}}>
+        <div style={{
+          background:"#fff",borderRadius:14,
+          boxShadow:"0 2px 12px rgba(0,0,0,0.08)",
+          overflow:"hidden", border:`1px solid ${T.border}`,
+          width:"297mm", minWidth:"297mm",
+          minHeight:"210mm",
+          margin:"0 auto",
+        }}>
+          <div style={{
+            background:"linear-gradient(135deg,#1E3A8A,#2563EB)",
+            padding:"0.9rem 1.2rem",
+            display:"flex", justifyContent:"space-between", alignItems:"center",
+          }}>
+            <h3 style={{color:"#fff",fontWeight:900,fontSize:"1.05rem",margin:0}}>
+              {selectedMonth.replace("-","년 ")}월 출석 현황
+            </h3>
+            <span style={{color:"rgba(255,255,255,0.7)",fontSize:"0.82rem"}}>
+              경과일 {totalDaysPassed}일 / 전체 {days.length}일
+            </span>
+          </div>
+
+          <div style={{overflowX:"auto"}}>
+            <table className="att-table" style={{minWidth:"max-content",width:"100%"}}>
+              <thead>
+                <tr>
+                  <th className="name-col" style={{minWidth:72}}>이름</th>
+                  {dayLabels.map(({key,label,sub,weekend})=>(
+                    <th key={key} style={{
+                      background: key===today ? "#1D4ED8" : weekend ? "#374151" : "#1E3A8A",
+                      color: key===today ? "#FCD34D" : weekend ? "#9CA3AF" : "#fff",
+                      minWidth:38, textAlign:"center",
+                    }}>
+                      <div style={{fontSize:"0.75rem",fontWeight:800}}>{label}</div>
+                      <div style={{fontSize:"0.58rem",opacity:0.75,marginTop:1}}>{sub}</div>
+                    </th>
+                  ))}
+                  <th style={{background:"#0F172A",minWidth:48,textAlign:"center"}}>합계</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stuList.map((student,si) => {
+                  const count = countForStudent(student);
+                  const rate = totalDaysPassed > 0 ? Math.round(count/totalDaysPassed*100) : 0;
+                  return (
+                    <tr key={student}>
+                      <td className="name-col" style={{
+                        fontWeight:700,fontSize:"0.82rem",color:T.text,
+                        background: si%2===0 ? "#F8FAFC" : "#EFF6FF",
+                      }}>
+                        {student}
+                      </td>
+                      {dayLabels.map(({key, weekend}) => {
+                        const status = getCell(student, key);
+                        const ciTime = status==="yes" ? getCheckInTime(student, key) : null;
+                        return (
+                          <td key={key}
+                            style={{
+                              background: status==="future"
+                                ? "#F8FAFC"
+                                : status==="yes"
+                                ? "#22C55E"
+                                : weekend ? "#FEF2F2" : "#FEE2E2",
+                              color: status==="yes" ? "#fff"
+                                   : status==="no" ? "#EF4444"
+                                   : "#CBD5E1",
+                              textAlign:"center", fontSize:"0.7rem", fontWeight:700,
+                              verticalAlign:"middle", lineHeight:1.1, padding:"0.2rem 0.15rem",
+                            }}>
+                            {status==="yes" ? (
+                              <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:1}}>
+                                <span style={{fontSize:"0.75rem"}}>✓</span>
+                                {ciTime && (
+                                  <span style={{fontSize:"0.58rem",fontWeight:600,opacity:0.9,
+                                    background:"rgba(0,0,0,0.15)",borderRadius:3,padding:"0 2px"}}>
+                                    {ciTime}
+                                  </span>
+                                )}
+                              </div>
+                            ) : status==="no" ? "✗" : ""}
+                          </td>
+                        );
+                      })}
+                      <td style={{
+                        textAlign:"center", fontWeight:900, fontSize:"0.82rem",
+                        background: rate>=80?"#DCFCE7":rate>=60?"#FEF9C3":"#FEE2E2",
+                        color: rate>=80?"#15803D":rate>=60?"#92400E":"#DC2626",
+                        borderLeft:`2px solid ${T.border}`,
+                      }}>
+                        {count}일
+                        <div style={{fontSize:"0.6rem",fontWeight:600,opacity:0.75}}>{rate}%</div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* 범례 */}
+          <div className="no-print" style={{
+            padding:"0.75rem 1.2rem", borderTop:`1px solid ${T.border}`,
+            display:"flex", gap:"1.2rem", flexWrap:"wrap", alignItems:"center",
+          }}>
+            <span style={{fontSize:"0.78rem",color:T.muted,fontWeight:700}}>범례:</span>
+            {[
+              {bg:"#22C55E",color:"#fff",label:"출석 ✓ (시간 표시)"},
+              {bg:"#FEE2E2",color:"#EF4444",label:"미출석 ✗"},
+              {bg:"#F8FAFC",color:"#CBD5E1",label:"미래"},
+            ].map(({bg,color,label})=>(
+              <span key={label} style={{display:"flex",alignItems:"center",gap:"0.35rem",fontSize:"0.78rem",color:T.text}}>
+                <span style={{
+                  width:18,height:18,background:bg,borderRadius:3,
+                  display:"inline-flex",alignItems:"center",justifyContent:"center",
+                  color,fontSize:"0.65rem",fontWeight:800,border:`1px solid ${T.border}`,
+                }}>{label.includes("✓")?"✓":label.includes("✗")?"✗":""}</span>
+                {label}
+              </span>
+            ))}
+            <span style={{marginLeft:"auto",fontSize:"0.75rem",color:T.muted}}>
+              합계 칸: 🟢 80%↑ &nbsp; 🟡 60%↑ &nbsp; 🔴 60%↓
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+//  설정 뷰 (전체 페이지)
+// ─────────────────────────────────────────────
+function SettingsView({ data, students, onSaveFront, onSaveEndTime, onSaveStudents, onSaveFile, onBack }) {
+  const [tab, setTab] = useState("endtime");
+
+  const tabs = [
+    { v:"endtime",  l:"⏱ 종료 시간" },
+    { v:"front",    l:"🪑 앞자리 설정" },
+    { v:"students", l:"👥 학생 명단" },
+    { v:"save",     l:"💾 파일 저장" },
+  ];
+
+  return (
+    <div style={{minHeight:"100vh", background:T.bg, fontFamily:T.font}}>
+      {/* 헤더 */}
+      <div style={{
+        background:T.surface, borderBottom:`1px solid ${T.border}`,
+        padding:"0.85rem 1.2rem", display:"flex", alignItems:"center", gap:"0.7rem",
+        boxShadow:"0 1px 6px rgba(0,0,0,0.06)",
+      }}>
+        <button onClick={onBack} style={btn(T.slate)}>← 뒤로</button>
+        <h2 style={{flex:1, textAlign:"center", fontSize:"1.1rem", fontWeight:800, color:T.text}}>
+          ⚙️ 설정
+        </h2>
+      </div>
+
+      {/* 탭 */}
+      <div style={{
+        background:T.surface, borderBottom:`1px solid ${T.border}`,
+        padding:"0.5rem 0.8rem", display:"flex", gap:"0.4rem", overflowX:"auto",
+      }}>
+        {tabs.map(({v,l})=>(
+          <button key={v} onClick={()=>setTab(v)} style={{
+            background: tab===v ? T.primary : "#F1F5F9",
+            color: tab===v ? "#fff" : T.slate,
+            border:"none", borderRadius:8, padding:"0.5rem 1rem",
+            fontFamily:T.font, fontWeight:700, fontSize:"0.83rem",
+            whiteSpace:"nowrap",
+            boxShadow: tab===v ? "0 2px 8px rgba(59,111,232,0.3)" : "none",
+          }}>{l}</button>
+        ))}
+      </div>
+
+      <div style={{maxWidth:640, margin:"0 auto", padding:"1.5rem 1rem"}}>
+        {tab==="endtime" && <EndTimeSetting autoEndTime={data.auto_end_time||"08:40"} onSave={onSaveEndTime} />}
+        {tab==="front"   && <FrontSetting frontStudents={data.front_students} students={students} onSave={onSaveFront} />}
+        {tab==="students"&& <StudentListSetting students={students} onSave={onSaveStudents} />}
+        {tab==="save"    && <FileSaveSetting onSave={onSaveFile} />}
+      </div>
+    </div>
+  );
+}
+
+// ── 종료 시간 설정 패널 ──
+function EndTimeSetting({ autoEndTime, onSave }) {
+  const [hh, setHh] = useState(() => (autoEndTime||"08:40").split(":")[0]);
+  const [mm, setMm] = useState(() => (autoEndTime||"08:40").split(":")[1]);
+  const endTime = `${hh}:${mm}`;
+
+  const hours   = Array.from({length:24},(_,i)=>String(i).padStart(2,"0"));
+  const minutes = Array.from({length:60},(_,i)=>String(i).padStart(2,"0"));
+
+  const selStyle = {
+    fontSize:"2rem", fontWeight:900, color:T.text,
+    border:`2px solid ${T.primary}`, borderRadius:12,
+    padding:"0.5rem 0.4rem", background:"#fff",
+    fontFamily:T.font, outline:"none", textAlign:"center",
+    width:90, cursor:"pointer", appearance:"none", WebkitAppearance:"none",
+    textAlignLast:"center",
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:"1.2rem"}}>
+      <div style={{background:"#fff",borderRadius:14,padding:"1.5rem",
+        boxShadow:"0 2px 12px rgba(0,0,0,0.07)",border:`1px solid ${T.border}`}}>
+        <h3 style={{fontWeight:800,fontSize:"1rem",color:T.text,marginBottom:"0.4rem"}}>⏰ 자습 자동 종료 시간</h3>
+        <p style={{fontSize:"0.8rem",color:T.muted,marginBottom:"1.2rem"}}>
+          설정한 시간이 되면 자습 중인 모든 학생의 기록이 자동으로 저장됩니다.
+        </p>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:"1rem",
+          background:"#F0F9FF",borderRadius:12,padding:"1.4rem",border:"1.5px solid #BAE6FD"}}>
+          <div style={{fontSize:"0.88rem",color:"#0369A1",fontWeight:700}}>종료 시간 선택</div>
+          <div style={{display:"flex",alignItems:"center",gap:"0.5rem"}}>
+            <select value={hh} onChange={e=>setHh(e.target.value)} style={selStyle}>
+              {hours.map(h=><option key={h} value={h}>{h}</option>)}
+            </select>
+            <span style={{fontSize:"2rem",fontWeight:900,color:T.text,lineHeight:1}}>:</span>
+            <select value={mm} onChange={e=>setMm(e.target.value)} style={selStyle}>
+              {minutes.map(m=><option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <p style={{fontSize:"0.78rem",color:T.muted}}>
+            현재 설정: <strong style={{color:T.primary}}>{autoEndTime}</strong>
+          </p>
+        </div>
+        <div style={{background:"#FEF9C3",borderRadius:10,padding:"0.8rem 1rem",
+          border:"1px solid #FDE047",fontSize:"0.8rem",color:"#854D0E",marginTop:"1rem"}}>
+          💡 설정 시간 이후에 앱에 접속하면 즉시 자동종료 처리됩니다.
+        </div>
+        <div style={{display:"flex",justifyContent:"flex-end",marginTop:"1.2rem"}}>
+          <button onClick={()=>onSave(endTime)} style={btn(T.primary)}>✓ 저장</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── 앞자리 설정 패널 ──
+function FrontSetting({ frontStudents, students, onSave }) {
+  const stuList = students || DEFAULT_STUDENTS;
+  const [listAll,   setListAll]  = useState(()=>stuList.filter(s=>!frontStudents.includes(s)).sort());
+  const [listFront, setListFront]= useState(()=>frontStudents.filter(s=>stuList.includes(s)));
+  const [selA, setSelA] = useState(new Set());
+  const [selF, setSelF] = useState(new Set());
+
+  const toggle = (sel,setSel,s) =>
+    setSel(prev=>{ const n=new Set(prev); n.has(s)?n.delete(s):n.add(s); return n; });
+  const toFront = () => {
+    const mv=[...selA];
+    setListFront(p=>[...p,...mv]);
+    setListAll(p=>p.filter(s=>!selA.has(s)));
+    setSelA(new Set());
+  };
+  const toAll = () => {
+    const mv=[...selF];
+    setListAll(p=>[...p,...mv].sort());
+    setListFront(p=>p.filter(s=>!selF.has(s)));
+    setSelF(new Set());
+  };
+
+  const listBox = (hasBorder) => ({
+    border: hasBorder?`2px solid ${T.frontBd}`:`1.5px solid ${T.border}`,
+    borderRadius:10, overflowY:"auto", overflowX:"hidden",
+    background: hasBorder?"#EFF6FF":"#FAFBFC",
+    height:240, flexShrink:0,
+  });
+  const item = (active) => ({
+    padding:"0.45rem 0.8rem", cursor:"pointer", fontSize:"0.88rem",
+    fontFamily:T.font, fontWeight:active?700:400,
+    background:active?"#DBEAFE":"transparent",
+    color:active?T.primary:T.text,
+    borderLeft:active?`3px solid ${T.primary}`:"3px solid transparent",
+  });
+
+  return (
+    <div style={{background:"#fff",borderRadius:14,padding:"1.5rem",
+      boxShadow:"0 2px 12px rgba(0,0,0,0.07)",border:`1px solid ${T.border}`}}>
+      <h3 style={{fontWeight:800,fontSize:"1rem",color:T.text,marginBottom:"0.3rem"}}>🪑 앞자리 지정</h3>
+      <p style={{fontSize:"0.78rem",color:T.muted,marginBottom:"1rem"}}>클릭으로 선택 후 화살표로 이동하세요</p>
+      <div style={{display:"flex",gap:"0.7rem"}}>
+        <div style={{flex:1,display:"flex",flexDirection:"column",gap:"0.4rem"}}>
+          <div style={{fontSize:"0.8rem",fontWeight:700,color:T.muted}}>일반 배정 ({listAll.length}명)</div>
+          <div style={listBox(false)}>
+            {listAll.map(s=>(
+              <div key={s} onClick={()=>toggle(selA,setSelA,s)} style={item(selA.has(s))}>{s}</div>
+            ))}
+          </div>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:"0.5rem"}}>
+          <button onClick={toFront} style={btn(T.primary,{padding:"0.5rem 0.8rem",fontSize:"1.1rem"})}>→</button>
+          <button onClick={toAll}   style={btn(T.purple, {padding:"0.5rem 0.8rem",fontSize:"1.1rem"})}>←</button>
+        </div>
+        <div style={{flex:1,display:"flex",flexDirection:"column",gap:"0.4rem"}}>
+          <div style={{fontSize:"0.8rem",fontWeight:700,color:T.primary}}>앞자리 지정 ({listFront.length}명)</div>
+          <div style={listBox(true)}>
+            {listFront.map(s=>(
+              <div key={s} onClick={()=>toggle(selF,setSelF,s)} style={item(selF.has(s))}>{s}</div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div style={{display:"flex",justifyContent:"flex-end",marginTop:"1rem"}}>
+        <button onClick={()=>onSave(listFront)} style={btn(T.green)}>✓ 저장</button>
+      </div>
+    </div>
+  );
+}
+
+// ── 학생 명단 수정 패널 ──
+function StudentListSetting({ students, onSave }) {
+  const stuList = students || DEFAULT_STUDENTS;
+  const [listText, setListText] = useState(()=>stuList.join("\n"));
+  const [editMode, setEditMode] = useState(false);
+  const [newName, setNewName]   = useState("");
+
+  const parsed = listText.split("\n").map(s=>s.trim()).filter(Boolean);
+
+  const addStudent = () => {
+    const name = newName.trim();
+    if (!name) return;
+    if (parsed.includes(name)) { alert("이미 있는 이름입니다."); return; }
+    setListText(prev => prev + (prev.trim() ? "\n" : "") + name);
+    setNewName("");
+  };
+
+  const removeStudent = (name) => {
+    setListText(prev => prev.split("\n").filter(s=>s.trim()!==name).join("\n"));
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:"1.2rem"}}>
+      <div style={{background:"#fff",borderRadius:14,padding:"1.5rem",
+        boxShadow:"0 2px 12px rgba(0,0,0,0.07)",border:`1px solid ${T.border}`}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"0.8rem"}}>
+          <div>
+            <h3 style={{fontWeight:800,fontSize:"1rem",color:T.text,margin:0}}>👥 학생 명단</h3>
+            <p style={{fontSize:"0.78rem",color:T.muted,margin:"0.2rem 0 0"}}>총 {parsed.length}명</p>
+          </div>
+          <button onClick={()=>setEditMode(e=>!e)} style={btn(editMode?T.amber:T.slate,{fontSize:"0.82rem"})}>
+            {editMode ? "✏️ 직접 편집 중..." : "✏️ 직접 편집"}
+          </button>
+        </div>
+
+        {editMode ? (
+          <>
+            <textarea
+              value={listText}
+              onChange={e=>setListText(e.target.value)}
+              rows={14}
+              style={{
+                width:"100%", fontFamily:T.font, fontSize:"0.9rem",
+                border:`2px solid ${T.primary}`, borderRadius:10,
+                padding:"0.8rem", resize:"vertical", outline:"none",
+                color:T.text, lineHeight:1.8,
+              }}
+              placeholder="한 줄에 학생 이름 하나씩 입력"
+            />
+            <p style={{fontSize:"0.75rem",color:T.muted,marginTop:"0.4rem"}}>
+              줄바꿈으로 구분 · 저장 후 반영됩니다
+            </p>
+          </>
+        ) : (
+          <>
+            <div style={{
+              border:`1.5px solid ${T.border}`,borderRadius:10,
+              maxHeight:300, overflowY:"auto", background:"#FAFBFC",
+            }}>
+              {parsed.map((name,i)=>(
+                <div key={i} style={{
+                  display:"flex",alignItems:"center",
+                  padding:"0.45rem 0.75rem",
+                  borderBottom: i<parsed.length-1?`1px solid ${T.border}`:"none",
+                  background: i%2===0?"#fff":"#F8FAFC",
+                }}>
+                  <span style={{
+                    width:24,height:24,borderRadius:"50%",
+                    background:T.primary,color:"#fff",
+                    fontSize:"0.7rem",fontWeight:700,
+                    display:"flex",alignItems:"center",justifyContent:"center",
+                    marginRight:"0.7rem",flexShrink:0,
+                  }}>{i+1}</span>
+                  <span style={{flex:1,fontFamily:T.font,fontSize:"0.9rem",fontWeight:500,color:T.text}}>
+                    {name}
+                  </span>
+                  <button onClick={()=>removeStudent(name)} style={{
+                    background:"#FEE2E2",border:"none",color:"#DC2626",
+                    borderRadius:6,padding:"0.2rem 0.5rem",fontSize:"0.78rem",
+                    fontFamily:T.font,fontWeight:700,
+                  }}>삭제</button>
+                </div>
+              ))}
+            </div>
+            {/* 학생 추가 */}
+            <div style={{display:"flex",gap:"0.5rem",marginTop:"0.8rem"}}>
+              <input
+                value={newName}
+                onChange={e=>setNewName(e.target.value)}
+                onKeyDown={e=>{ if(e.key==="Enter") addStudent(); }}
+                placeholder="추가할 학생 이름"
+                style={{
+                  flex:1, fontFamily:T.font, fontSize:"0.9rem",
+                  border:`1.5px solid ${T.border}`, borderRadius:8,
+                  padding:"0.5rem 0.8rem", outline:"none",
+                }}
+              />
+              <button onClick={addStudent} style={btn(T.green,{padding:"0.5rem 1rem"})}>+ 추가</button>
+            </div>
+          </>
+        )}
+
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:"1rem"}}>
+          <button onClick={()=>{ setListText(DEFAULT_STUDENTS.join("\n")); }}
+            style={btn("#94A3B8",{fontSize:"0.8rem"})}>기본값으로 초기화</button>
+          <button onClick={()=>{ onSave(parsed); setEditMode(false); }}
+            style={btn(T.primary)}>✓ 저장 ({parsed.length}명)</button>
+        </div>
+      </div>
+
+      <div style={{
+        background:"#FEF9C3",borderRadius:10,padding:"0.8rem 1rem",
+        border:"1px solid #FDE047",fontSize:"0.8rem",color:"#854D0E",
+      }}>
+        ⚠ 학생 명단 변경 시 기존 출석 기록은 유지되지만, 삭제된 학생의 기록은 출석표에 표시되지 않습니다.
+      </div>
+    </div>
+  );
+}
+
+// ── 파일 저장 패널 ──
+function FileSaveSetting({ onSave }) {
+  const today = new Date();
+  const filename = getTodayFilename(today);
+  return (
+    <div style={{background:"#fff",borderRadius:14,padding:"1.5rem",
+      boxShadow:"0 2px 12px rgba(0,0,0,0.07)",border:`1px solid ${T.border}`}}>
+      <h3 style={{fontWeight:800,fontSize:"1rem",color:T.text,marginBottom:"0.3rem"}}>💾 파일로 저장</h3>
+      <p style={{fontSize:"0.8rem",color:T.muted,marginBottom:"1.2rem"}}>
+        자습 기록을 파일로 내보냅니다. 같은 날짜 파일은 덮어씌워집니다.
+      </p>
+      <div style={{
+        background:"#F0F9FF",borderRadius:12,padding:"1.2rem",
+        border:"1.5px solid #BAE6FD", marginBottom:"1.2rem",
+      }}>
+        <div style={{fontSize:"0.78rem",color:"#0369A1",fontWeight:700,marginBottom:"0.5rem"}}>저장될 파일명</div>
+        <div style={{
+          fontFamily:"monospace",fontSize:"0.95rem",fontWeight:700,
+          color:T.text,background:"#fff",borderRadius:8,
+          padding:"0.6rem 0.9rem",border:`1px solid ${T.border}`,
+        }}>
+          📄 {filename}.json
+        </div>
+      </div>
+      <div style={{background:"#F0FDF4",borderRadius:10,padding:"0.8rem 1rem",
+        border:"1px solid #86EFAC",fontSize:"0.8rem",color:"#15803D",marginBottom:"1.2rem"}}>
+        ✅ 브라우저를 닫을 때도 오늘 날짜 파일로 자동 저장됩니다.
+      </div>
+      <button onClick={onSave} style={{
+        ...btn(T.primary), width:"100%", padding:"0.8rem", fontSize:"1rem",
+      }}>
+        💾 지금 저장하기
+      </button>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+//  월별 순위 모달
+// ─────────────────────────────────────────────
+function RankingsModal({ attendance, onClose, onReset, onExport, onImport }) {
+  const [tab,          setTab]          = useState("count");
+  const [confirmReset, setConfirmReset] = useState(false);
+  const monthKey  = getMonthKey();
+  const monthData = attendance[monthKey] || {};
+  const stats = Object.entries(monthData).map(([name,info])=>({
+    name, count:info.count||0, time:info.time||0,
+  }));
+  const sorted = tab==="count"
+    ? [...stats].sort((a,b)=>b.count-a.count)
+    : [...stats].sort((a,b)=>b.time-a.time);
+  const MEDALS = ["🥇","🥈","🥉"];
+
+  return (
+    <Overlay onClose={onClose} wide>
+      <div style={{fontFamily:T.font, display:"flex", flexDirection:"column", height:"100%"}}>
+        <div style={{
+          background:"linear-gradient(135deg,#0f1b3d,#2563EB)",
+          margin:"-1.5rem -1.5rem 0", padding:"1.3rem 1.4rem 0",
+          borderRadius:"16px 16px 0 0", flexShrink:0,
+        }}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"0.9rem"}}>
+            <div>
+              <h2 style={{color:"#fff",fontWeight:900,fontSize:"1.15rem",margin:"0 0 0.2rem"}}>
+                🏆 명예의 전당
+              </h2>
+              <p style={{color:"rgba(255,255,255,0.5)",fontSize:"0.8rem",margin:0}}>
+                {monthKey} 아침 자습 누적 기록
+              </p>
+            </div>
+            <button onClick={onClose} style={{
+              background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",
+              borderRadius:8,padding:"0.35rem 0.8rem",fontFamily:T.font,
+            }}>✕ 닫기</button>
+          </div>
+          <div style={{display:"flex"}}>
+            {[{v:"count",l:"출석 횟수"},{v:"time",l:"자습 시간"}].map(({v,l})=>(
+              <button key={v} onClick={()=>setTab(v)} style={{
+                flex:1, padding:"0.55rem", border:"none", fontFamily:T.font,
+                fontWeight:700, fontSize:"0.86rem",
+                background:tab===v?"#fff":"transparent",
+                color:tab===v?"#1e3c72":"rgba(255,255,255,0.65)",
+                borderRadius:tab===v?"8px 8px 0 0":0, transition:"all .2s",
+              }}>{l}</button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{overflowY:"auto", flex:1, minHeight:0}}>
+          {sorted.length===0 ? (
+            <div style={{textAlign:"center",padding:"3rem 1rem",color:T.muted,fontFamily:T.font}}>
+              <div style={{fontSize:"2.5rem",marginBottom:"0.5rem"}}>📭</div>
+              <p style={{fontSize:"0.9rem"}}>이번 달 기록이 아직 없습니다</p>
+            </div>
+          ) : sorted.map((item,i)=>{
+            const record = tab==="count" ? `${item.count}회` : formatTime(item.time);
+            const isTop  = i < 3;
+            return (
+              <div key={item.name} style={{
+                display:"flex", alignItems:"center",
+                padding:"0.8rem 1.4rem",
+                borderBottom:`1px solid ${T.border}`,
+                background: isTop ? ["#FFFBEB","#F8FAFC","#FFF5F5"][i] : "#fff",
+                fontFamily:T.font,
+              }}>
+                <span style={{
+                  width:42, textAlign:"center", flexShrink:0,
+                  fontSize:isTop?"1.35rem":"0.82rem",
+                  color:T.muted, fontWeight:700,
+                }}>{MEDALS[i]||`${i+1}위`}</span>
+                <span style={{flex:1,fontWeight:700,fontSize:"0.92rem",color:T.text,marginLeft:4}}>
+                  {item.name}
+                </span>
+                <span style={{fontWeight:800,color:tab==="count"?T.primary:T.green,fontSize:"0.95rem"}}>
+                  {record}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={{flexShrink:0, borderTop:`1px solid ${T.border}`, paddingTop:"0.75rem", marginTop:"0.4rem"}}>
+          {confirmReset ? (
+            <div style={{
+              background:"#FFF5F5", borderRadius:10,
+              padding:"0.75rem 1rem", textAlign:"center",
+            }}>
+              <p style={{fontSize:"0.85rem",fontWeight:700,color:"#DC2626",marginBottom:"0.6rem"}}>
+                ⚠ 이번 달({monthKey}) 기록을 모두 삭제할까요?
+              </p>
+              <div style={{display:"flex",gap:"0.6rem",justifyContent:"center"}}>
+                <button onClick={()=>setConfirmReset(false)}
+                  style={btn("#94A3B8",{fontSize:"0.82rem",padding:"0.4rem 1rem"})}>취소</button>
+                <button onClick={()=>{ onReset(monthKey); setConfirmReset(false); }}
+                  style={btn("#DC2626",{fontSize:"0.82rem",padding:"0.4rem 1rem"})}>확인, 초기화</button>
+              </div>
+            </div>
+          ) : (
+            <div style={{display:"flex", gap:"0.5rem", flexWrap:"wrap", justifyContent:"center"}}>
+              <button onClick={onExport}
+                style={btn("#0EA5E9",{fontSize:"0.8rem",padding:"0.45rem 0.9rem"})}>
+                💾 파일로 저장
+              </button>
+              <label style={{
+                ...btn("#7C3AED",{fontSize:"0.8rem",padding:"0.45rem 0.9rem"}),
+                display:"inline-flex", alignItems:"center", cursor:"pointer",
+              }}>
+                📂 파일 불러오기
+                <input type="file" accept=".json" onChange={onImport} style={{display:"none"}}/>
+              </label>
+              <button onClick={()=>setConfirmReset(true)}
+                style={btn("#EF4444",{fontSize:"0.8rem",padding:"0.45rem 0.9rem"})}>
+                🗑 이번 달 초기화
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </Overlay>
+  );
+}
+
+// ─────────────────────────────────────────────
+//  공용 Overlay
+// ─────────────────────────────────────────────
+function Overlay({ children, onClose, wide }) {
+  return (
+    <div
+      style={{
+        position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",
+        display:"flex",alignItems:"center",justifyContent:"center",
+        zIndex:1000, padding:"1rem",
+      }}
+      onClick={e=>{ if(e.target===e.currentTarget) onClose(); }}
+    >
+      <div style={{
+        background:"#fff", borderRadius:16,
+        width: wide?"min(500px,93vw)":"min(560px,93vw)",
+        height: wide ? "85vh" : "auto",
+        maxHeight:"85vh", display:"flex", flexDirection:"column",
+        boxShadow:"0 24px 64px rgba(0,0,0,0.28)",
+        padding:"1.5rem", overflow:"hidden",
+        fontFamily:T.font,
+      }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+//  마운트
+// ─────────────────────────────────────────────
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
